@@ -133,8 +133,8 @@ class VerlGRPO(TrainingService):
         
         print(f"n_gpus: {n_gpus} | activations_gpus: {reserve_for_activations}")
 
-        full_batch_size = self.training_config.num_prompts * self.training_config.num_generations
-        self.print(f"Optimizer update batch size: {full_batch_size}")
+        full_batch_size = self.training_config.train_batch_size * self.training_config.num_generations
+        self.print(f"Rollout batch size: {full_batch_size}")
 
         # Calculate checkpoint save contents based on save_only_model
         # Format as YAML list string for the template
@@ -171,8 +171,8 @@ class VerlGRPO(TrainingService):
                     'output_dir': self.training_config.output_dir,
                     'reward_funcs_kwargs': self.training_config.reward_funcs_kwargs,
                     'screening_funcs_kwargs': self.training_config.screening_funcs_kwargs,
-                    'train_batch_size': self.training_config.num_prompts,
-                    'mini_batch_size': self.training_config.num_prompts, # batch size per optimizer step
+                    'train_batch_size': self.training_config.train_batch_size,
+                    'mini_batch_size': self.training_config.mini_batch_size,
                     'train_dataset_parquet_path': self.train_dataset_path(),
                     'validation_dataset_parquet_path': self.validation_dataset_path(),
                     'reward_func_path': "src/train/verl/rewards.py",

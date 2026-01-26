@@ -45,6 +45,7 @@ actor_rollout_ref:
         ppo_micro_batch_size_per_gpu: {{ per_device_batch_size }}
         use_dynamic_bsz: {{ use_dynamic_bsz }}
         ppo_max_token_len_per_gpu: {{ ppo_max_token_len_per_gpu }}
+        loss_agg_mode: seq-mean-token-sum  # Each sequence weighted equally, compatible with dynamic batching
         use_kl_loss: true # Must be true for GRPO
         kl_loss_coef: {{ beta }}
         kl_loss_type: low_var_kl
