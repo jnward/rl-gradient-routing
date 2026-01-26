@@ -12,3 +12,8 @@ wheels/
 # Data files
 *.jsonl
 *.json
+
+*.un~
+*.swp
+*.swo
+*.swn
