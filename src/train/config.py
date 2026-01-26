@@ -164,7 +164,7 @@ class GRPOConfig(TrainingConfig):
     per_device_batch_size: int = 8 # Number of prompts to run on each device; for Verl Only (for Unsloth == num_generations); if auto_find_batch_size is True this is transformed to tokens via per_device_batch_size * (max_prompt_length + max_completion_length)
     auto_find_batch_size: bool = True # Recommend set to True at first, then restart + set to False
 
-    enable_gradient_checkpointing: bool = True # Enable gradient checkpointing for the model
+    enable_gradient_checkpointing: bool = False # Disable gradient checkpointing for faster training (uses more memory)
     gpu_memory_utilization: float = 0.6 # Reduce for verl, can set to 0.9 for unsloth
 
     # GRPO Generation config
