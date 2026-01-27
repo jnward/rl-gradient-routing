@@ -24,25 +24,26 @@ grep "timing_s" wandb/latest-run/files/output.log | tail -5
 
 ### How the Timing Code Works
 
-The training loop in `src/train/verl/trainer.py` uses VERL's `marked_timer` context manager:
+The training loop in `src/train/verl/trainer.py` wraps VERL's `marked_timer` with `timed_section`, which adds absolute timestamps:
 
 ```python
-from verl.utils.debug import marked_timer
+timing_raw = {}   # Durations in seconds
+timing_abs = {}   # Absolute timestamps (time.time())
 
-timing_raw = {}  # Initialized each step
-with marked_timer("gen", timing_raw, color="red"):
+with timed_section("gen", timing_raw, timing_abs, color="red"):
     # generation code
-with marked_timer("reward", timing_raw, color="yellow"):
+with timed_section("reward", timing_raw, timing_abs, color="yellow"):
     # reward computation
 ```
 
 **Key points:**
-- `timing_raw` is a dict that accumulates durations (in seconds) for each named section
-- Timers record **durations only, not absolute timestamps** - uses `codetiming.Timer` under the hood
-- At step end, `compute_timing_metrics(batch, timing_raw)` transforms this into logged metrics:
+- `timing_raw` is a dict that accumulates durations (in seconds) for each named section (VERL's `marked_timer` via `codetiming.Timer`)
+- `timing_abs` records absolute Unix timestamps (`time.time()`) for each section's start and end
+- At step end, `compute_timing_metrics(batch, timing_raw)` transforms durations into logged metrics:
   - `timing_s/{name}` - raw seconds
   - `timing_per_token_ms/{name}` - milliseconds per token
-- These are logged via `logger.log(data=metrics, step=self.global_steps)` to wandb
+- Absolute timestamps are logged as `timing_abs/{name}/start` and `timing_abs/{name}/end`
+- All metrics are logged via `logger.log(data=metrics, step=self.global_steps)` to wandb
 
 ### Key Timing Sections
 
@@ -72,13 +73,11 @@ uv run python scripts/run_rl_training.py ...
 
 ### Adding Custom Timers
 
-To add timing to new code sections:
+To add timing to new code sections in `_fit()`:
 ```python
-from verl.utils.debug import marked_timer
-
-# Inside _fit() where timing_raw exists:
-with marked_timer("my_section", timing_raw, color="blue"):
+# Inside _fit() where timing_raw and timing_abs exist:
+with timed_section("my_section", timing_raw, timing_abs, color="blue"):
     # code to time
 ```
 
-The timing will automatically appear in wandb as `timing_s/my_section`.
+This logs duration as `timing_s/my_section` and absolute timestamps as `timing_abs/my_section/start` and `timing_abs/my_section/end`.

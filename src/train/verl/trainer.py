@@ -1,9 +1,11 @@
 import os
 import random
+import time
 import torch
 import socket
 import ray
 import warnings
+from contextlib import contextmanager
 from tqdm import tqdm
 import numpy as np
 import json
@@ -57,8 +59,17 @@ from src.utils import get_logger
 logger = get_logger()
 
 '''
-This file wraps/modifies the classes and functions primarily from verl/verl/trainer/ppo/ray_trainer.py 
+This file wraps/modifies the classes and functions primarily from verl/verl/trainer/ppo/ray_trainer.py
 '''
+
+
+@contextmanager
+def timed_section(name, timing_raw, timing_abs, **kwargs):
+    """Wrapper around marked_timer that also records absolute timestamps."""
+    timing_abs[f"{name}/start"] = time.time()
+    with marked_timer(name, timing_raw, **kwargs):
+        yield
+    timing_abs[f"{name}/end"] = time.time()
 
 
 @register_adv_est("grpo_modified")
@@ -410,8 +421,9 @@ class RHGRPORayTrainer(RayPPOTrainer):
             for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
+                timing_abs = {}
 
-                with marked_timer("start_profile", timing_raw):
+                with timed_section("start_profile", timing_raw, timing_abs):
                     self._start_profiling(
                         not prev_step_profile and curr_step_profile
                         if self.config.global_profiler.profile_continuous_steps
@@ -433,9 +445,9 @@ class RHGRPORayTrainer(RayPPOTrainer):
                 )
 
                 is_last_step = self.global_steps >= self.total_training_steps
-                with marked_timer("step", timing_raw):
+                with timed_section("step", timing_raw, timing_abs):
                     # generate a batch
-                    with marked_timer("gen", timing_raw, color="red"):
+                    with timed_section("gen", timing_raw, timing_abs, color="red"):
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                         else:
@@ -448,7 +460,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                         if self.reward_fn is None:
                             raise ValueError("A reward_fn is required for REMAX advantage estimation.")
 
-                        with marked_timer("gen_max", timing_raw, color="purple"):
+                        with timed_section("gen_max", timing_raw, timing_abs, color="purple"):
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
                             if not self.async_rollout_mode:
@@ -490,7 +502,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
 
                     # Optionally cache activations using dedicated worker
                     if self.cache_activations:
-                        with marked_timer("activations", timing_raw, color="green"):
+                        with timed_section("activations", timing_raw, timing_abs, color="green"):
                             try:
                                 # Ray's dispatcher runs this method on every rank, but we only need the rank-0 payload.
                                 lora_params = self.actor_rollout_wg.actor_rollout_get_lora_params(
@@ -514,7 +526,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                                 raise e
                         
 
-                    with marked_timer("reward", timing_raw, color="yellow"):
+                    with timed_section("reward", timing_raw, timing_abs, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
@@ -542,7 +554,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                             policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
                         )
                     else:  # Recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw, color="blue"):
+                        with timed_section("old_log_prob", timing_raw, timing_abs, color="blue"):
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
@@ -564,7 +576,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
 
                     if self.use_reference_policy:
                         # compute reference log_prob
-                        with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                        with timed_section(str(Role.RefPolicy), timing_raw, timing_abs, color="olive"):
                             if not self.ref_in_actor:
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             else:
@@ -573,11 +585,11 @@ class RHGRPORayTrainer(RayPPOTrainer):
 
                     # compute values
                     if self.use_critic:
-                        with marked_timer("values", timing_raw, color="cyan"):
+                        with timed_section("values", timing_raw, timing_abs, color="cyan"):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
-                    with marked_timer("adv", timing_raw, color="brown"):
+                    with timed_section("adv", timing_raw, timing_abs, color="brown"):
                         # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
                         if self.config.reward_model.launch_reward_fn_async:
@@ -652,7 +664,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
 
                     # update critic
                     if self.use_critic:
-                        with marked_timer("update_critic", timing_raw, color="pink"):
+                        with timed_section("update_critic", timing_raw, timing_abs, color="pink"):
                             critic_output = self.critic_wg.update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
@@ -660,7 +672,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
-                        with marked_timer("update_actor", timing_raw, color="red"):
+                        with timed_section("update_actor", timing_raw, timing_abs, color="red"):
                             rollout_config = self.config.actor_rollout_ref.rollout
                             batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
                             # TODO: Make "temperature" single source of truth from generation.
@@ -687,7 +699,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                     and self.config.trainer.test_freq > 0
                     and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
                 ):
-                    with marked_timer("testing", timing_raw, color="green"):
+                    with timed_section("testing", timing_raw, timing_abs, color="green"):
                         val_metrics: dict = self._validate()
                         if is_last_step:
                             last_val_metrics = val_metrics
@@ -710,10 +722,10 @@ class RHGRPORayTrainer(RayPPOTrainer):
                 ):
                     if esi_close_to_expiration:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
-                    with marked_timer("save_checkpoint", timing_raw, color="green"):
+                    with timed_section("save_checkpoint", timing_raw, timing_abs, color="green"):
                         self._save_checkpoint()
 
-                with marked_timer("stop_profile", timing_raw):
+                with timed_section("stop_profile", timing_raw, timing_abs):
                     next_step_profile = (
                         self.global_steps + 1 in self.config.global_profiler.steps
                         if self.config.global_profiler.steps is not None
@@ -740,6 +752,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+                metrics.update({f"timing_abs/{k}": v for k, v in timing_abs.items()})
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
