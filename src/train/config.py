@@ -162,10 +162,10 @@ class GRPOConfig(TrainingConfig):
     num_generations: int = 8 # Number of rollouts per prompt
     train_batch_size: int = 16 # Number of prompts per rollout iteration
     mini_batch_size: int = 8 # Number of prompts per optimizer step
-    per_device_batch_size: int = 32 # Number of prompts to run on each device; for Verl Only (for Unsloth == num_generations); if auto_find_batch_size is True this is transformed to tokens via per_device_batch_size * (max_prompt_length + max_completion_length)
+    per_device_batch_size: int = 8 # Number of prompts to run on each device; for Verl Only (for Unsloth == num_generations); if auto_find_batch_size is True this is transformed to tokens via per_device_batch_size * (max_prompt_length + max_completion_length)
     auto_find_batch_size: bool = False # Recommend set to True at first, then restart + set to False
 
-    enable_gradient_checkpointing: bool = True # Disable gradient checkpointing for faster training (uses more memory)
+    enable_gradient_checkpointing: bool = False # Disable gradient checkpointing for faster training (uses more memory)
     gpu_memory_utilization: float = 0.95 # Reduce for verl, can set to 0.9 for unsloth
 
     # GRPO Generation config

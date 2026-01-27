@@ -68,9 +68,9 @@ def main_run_rl(
         num_generations = kwargs.get('num_generations', 8),
         train_batch_size = kwargs.get('train_batch_size', 16),
         mini_batch_size = kwargs.get('mini_batch_size', 8),
-        per_device_batch_size = kwargs.get('per_device_batch_size', 32),
+        per_device_batch_size = kwargs.get('per_device_batch_size', 8),
         
-        gpu_memory_utilization = kwargs.get('gpu_memory_utilization', 0.9),
+        gpu_memory_utilization = kwargs.get('gpu_memory_utilization', 0.88),
         max_prompt_length = kwargs.get('max_prompt_length', 1536),
         max_completion_length = kwargs.get('max_completion_length', 1536),
         max_steps = int(steps),
