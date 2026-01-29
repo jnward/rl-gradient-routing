@@ -42,13 +42,13 @@ class TrainingInputValue(TypedDict):
 
 class TrainingService(ABC):
     name: str
-    def __init__(self, training_config: TrainingConfig):
+    def __init__(self, training_config: TrainingConfig, resuming: bool = False):
         self.training_config = training_config
 
-        assert not os.path.exists(self.training_config.config_path), f"Run config already exists at {self.training_config.config_path}"
-        assert not os.path.exists(self.training_config.output_adapter_path), f"Output adapter path already exists at {self.training_config.output_adapter_path}"
-
-        self.training_config.save()
+        if not resuming:
+            assert not os.path.exists(self.training_config.config_path), f"Run config already exists at {self.training_config.config_path}"
+            assert not os.path.exists(self.training_config.output_adapter_path), f"Output adapter path already exists at {self.training_config.output_adapter_path}"
+            self.training_config.save()
         self.print(f'Initialized {self.name} training service with config: {self.training_config}')
 
         self.setup_logging()

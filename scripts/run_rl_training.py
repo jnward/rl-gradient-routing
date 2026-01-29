@@ -1,4 +1,5 @@
 import fire
+import json
 import os
 from datetime import datetime
 from typing import Literal
@@ -404,6 +405,61 @@ def run_inoculation_intervention(
     )
 
 
+def resume(run_id: str | None = None):
+    """Resume a training run from its most recent checkpoint.
+
+    If no run_id is given, resumes the most recent run (by directory name).
+    """
+    runs_base = f"{RESULTS_PATH}/runs"
+    assert os.path.isdir(runs_base), f"No runs directory found: {runs_base}"
+
+    if run_id is not None:
+        # Search for the specific run_id across all model directories
+        run_path = None
+        for model_dir in os.listdir(runs_base):
+            candidate = os.path.join(runs_base, model_dir, run_id)
+            if os.path.isdir(candidate) and os.path.exists(os.path.join(candidate, "config.json")):
+                run_path = candidate
+                break
+        assert run_path is not None, f"Run not found: {run_id}"
+    else:
+        # Find the most recent run across all model directories
+        all_runs = []
+        for model_dir in os.listdir(runs_base):
+            model_path = os.path.join(runs_base, model_dir)
+            if not os.path.isdir(model_path):
+                continue
+            for run_dir in os.listdir(model_path):
+                run_path = os.path.join(model_path, run_dir)
+                if os.path.isdir(run_path) and os.path.exists(os.path.join(run_path, "config.json")):
+                    all_runs.append((run_dir, run_path))
+        assert len(all_runs) > 0, f"No runs with config.json found in {runs_base}"
+        # Sort by directory name (timestamp prefix) to find most recent
+        all_runs.sort(key=lambda x: x[0], reverse=True)
+        run_path = all_runs[0][1]
+
+    config_path = os.path.join(run_path, "config.json")
+    with open(config_path, 'r') as f:
+        config_data = json.load(f)
+
+    config = GRPOConfig(**config_data)
+
+    # Verify checkpoints exist
+    ckpt_dir = os.path.join(run_path, "checkpoints")
+    assert os.path.isdir(ckpt_dir), f"No checkpoints directory found: {ckpt_dir}"
+    ckpts = sorted([d for d in os.listdir(ckpt_dir) if d.startswith("global_step_")])
+    assert len(ckpts) > 0, f"No checkpoints found in {ckpt_dir}"
+
+    print(f"Resuming run: {config.run_id}")
+    print(f"Output dir: {config.output_dir}")
+    print(f"Available checkpoints: {ckpts}")
+    print(f"VERL will resume from: {ckpts[-1]}")
+
+    trainer = VerlGRPO(config, resuming=True)
+    trainer.run()
+    print(f"Training completed for {config.run_id}")
+
+
 if __name__ == "__main__":
     utils.load_dotenv()
     fire.Fire({
@@ -413,4 +469,5 @@ if __name__ == "__main__":
         'probe': run_probe_intervention,
         'llmjudge': run_llmjudge_intervention,
         'inoculation': run_inoculation_intervention,
+        'resume': resume,
     })
