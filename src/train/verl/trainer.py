@@ -352,14 +352,15 @@ class RHGRPORayTrainer(RayPPOTrainer):
         from omegaconf import OmegaConf
         from verl.utils.tracking import Tracking
 
+        # Initialize global_steps early so checkpoint saving works even if we fail during setup
+        self.global_steps = 0
+
         logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
-
-        self.global_steps = 0
 
         # load checkpoint before doing anything
         self._load_checkpoint()
