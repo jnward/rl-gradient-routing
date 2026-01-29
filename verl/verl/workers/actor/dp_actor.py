@@ -531,85 +531,104 @@ class DataParallelPPOActor(BasePPOActor):
 
 
 class GradientRoutingPPOActor(DataParallelPPOActor):
-    """PPO Actor with two-adapter gradient routing for reward hacking mitigation.
+    """PPO Actor with single-pass gradient routing for reward hacking mitigation.
 
-    This class implements gradient routing using two LoRA adapters:
+    This class implements gradient routing using two LoRA adapters ("retain" and "forget")
+    with a single optimizer over all parameters. The key optimization is using homogeneous
+    micro-batches and weight gradient hooks to achieve gradient routing in a single
+    forward+backward pass per sample.
+
     - "forget" adapter: Updated on ALL examples
-    - "retain" adapter: Updated only on UNLABELED (non-reward-hacking) examples
+    - "retain" adapter: Updated only on "good" (non-reward-hacking) examples
 
-    The training uses two forward/backward passes per batch with M/N gradient scaling
-    for the retain adapter to maintain equal per-example influence.
+    For "bad" micro-batches, hooks zero out retain adapter weight gradients during backward.
+    Since weights are leaf nodes, this doesn't affect gradients for other parameters.
+
+    See docs/gradient_routing_optimization.md for design discussion.
     """
 
     def __init__(
         self,
         config: ActorConfig,
         actor_module: nn.Module,
-        retain_optimizer: torch.optim.Optimizer,
-        forget_optimizer: torch.optim.Optimizer,
+        actor_optimizer: torch.optim.Optimizer,
     ):
-        """Initialize with two optimizers for gradient routing.
+        """Initialize with single optimizer for all adapter parameters.
 
         Args:
             config: Actor configuration
             actor_module: PEFT model with "retain" and "forget" adapters
-            retain_optimizer: Optimizer for retain adapter parameters
-            forget_optimizer: Optimizer for forget adapter parameters
+            actor_optimizer: Optimizer for all LoRA parameters (both adapters)
         """
-        # Initialize parent with actor_optimizer=None (we use separate optimizers)
-        super().__init__(config, actor_module, actor_optimizer=None)
-        self.retain_optimizer = retain_optimizer
-        self.forget_optimizer = forget_optimizer
+        super().__init__(config, actor_module, actor_optimizer=actor_optimizer)
 
-    def _optimizer_step_for(self, optimizer: torch.optim.Optimizer) -> torch.Tensor:
-        """Perform optimizer step for a specific optimizer.
+        # Build set of retain adapter weight parameters for gradient masking
+        self._retain_weight_params = set()
+        for name, param in actor_module.named_parameters():
+            if "lora" in name.lower() and "retain" in name and param.requires_grad:
+                self._retain_weight_params.add(param)
+
+        assert len(self._retain_weight_params) > 0, (
+            "No retain adapter parameters found. "
+            "Ensure the model has a 'retain' LoRA adapter with requires_grad=True."
+        )
+
+    def _make_homogeneous_micro_batches(
+        self,
+        mini_batch: DataProto,
+        is_bad: list[bool],
+        micro_batch_size: int,
+    ) -> list[tuple[DataProto, bool]]:
+        """Split mini_batch into homogeneous micro-batches (all-good or all-bad).
 
         Args:
-            optimizer: The optimizer to step
+            mini_batch: The mini-batch to split
+            is_bad: Boolean list indicating which samples are "bad" (reward hacking)
+            micro_batch_size: Target size for each micro-batch
 
         Returns:
-            grad_norm: The gradient norm before clipping
+            List of (micro_batch, is_bad_batch) tuples, shuffled to avoid ordering bias
         """
-        assert self.config.grad_clip is not None
-        if self.scaler is not None:
-            self.scaler.unscale_(optimizer)
+        import random
 
-        if isinstance(self.actor_module, FSDP):
-            grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
-        elif isinstance(self.actor_module, FSDPModule):
-            grad_norm = fsdp2_clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
-        else:
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
+        # Separate indices
+        good_indices = [i for i, bad in enumerate(is_bad) if not bad]
+        bad_indices = [i for i, bad in enumerate(is_bad) if bad]
 
-        if isinstance(grad_norm, DTensor):
-            grad_norm = grad_norm.full_tensor()
+        def chunk_indices(indices: list[int], size: int) -> list[list[int]]:
+            """Split indices into chunks of given size."""
+            return [indices[i:i + size] for i in range(0, len(indices), size)] if indices else []
 
-        if self.scaler is not None:
-            self.scaler.step(optimizer)
-            self.scaler.update()
-        else:
-            if not torch.isfinite(grad_norm):
-                print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
-                optimizer.zero_grad()
-            else:
-                optimizer.step()
-        return grad_norm
+        good_chunks = chunk_indices(good_indices, micro_batch_size)
+        bad_chunks = chunk_indices(bad_indices, micro_batch_size)
 
-    def _filter_batch(self, data: DataProto, mask: list[bool]) -> DataProto:
-        """Filter a DataProto batch to only include examples where mask is True.
+        # Build micro-batches with their "is_bad" tag
+        micro_batches_with_tags = []
+
+        for chunk in good_chunks:
+            micro_batch = self._select_indices(mini_batch, chunk)
+            micro_batches_with_tags.append((micro_batch, False))  # False = good batch
+
+        for chunk in bad_chunks:
+            micro_batch = self._select_indices(mini_batch, chunk)
+            micro_batches_with_tags.append((micro_batch, True))  # True = bad batch
+
+        # Shuffle to avoid ordering bias
+        random.shuffle(micro_batches_with_tags)
+
+        return micro_batches_with_tags
+
+    def _select_indices(self, data: DataProto, indices: list[int]) -> DataProto:
+        """Select specific indices from a DataProto batch.
 
         Args:
             data: The original DataProto batch
-            mask: Boolean list indicating which examples to keep
+            indices: List of indices to select
 
         Returns:
-            Filtered DataProto with only masked examples
+            New DataProto with only the selected indices
         """
-        indices = [i for i, m in enumerate(mask) if m]
-        if len(indices) == 0:
-            return None
-
-        # Filter tensor batch
+        # Select from tensor batch
         filtered_tensors = {}
         for key, tensor in data.batch.items():
             if isinstance(tensor, torch.Tensor):
@@ -617,7 +636,7 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             else:
                 filtered_tensors[key] = tensor
 
-        # Filter non-tensor batch
+        # Select from non-tensor batch
         filtered_non_tensors = {}
         for key, value in data.non_tensor_batch.items():
             if isinstance(value, np.ndarray):
@@ -625,36 +644,75 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             elif isinstance(value, (list, tuple)):
                 filtered_non_tensors[key] = [value[i] for i in indices]
             elif hasattr(value, '__getitem__') and hasattr(value, '__len__'):
-                filtered_non_tensors[key] = value[indices]
+                try:
+                    filtered_non_tensors[key] = [value[i] for i in indices]
+                except (TypeError, KeyError):
+                    filtered_non_tensors[key] = value
             else:
                 filtered_non_tensors[key] = value
 
-        # Use from_dict to properly create TensorDict and convert non_tensors to numpy
         return DataProto.from_dict(
             tensors=filtered_tensors,
             non_tensors=filtered_non_tensors,
             meta_info=data.meta_info.copy() if data.meta_info else {}
         )
 
-    def _training_pass(
-        self,
-        data: DataProto,
-        temperature: float,
-        loss_scale: float = 1.0,
-        advantage_key: str = "advantages",
-    ) -> dict:
-        """Perform a single forward/backward pass over data.
-
-        Args:
-            data: The batch data
-            temperature: Sampling temperature
-            loss_scale: Scale factor for the loss (M/N for retain adapter)
-            advantage_key: Key to use for advantages in batch (default "advantages",
-                          use "advantages_unlabeled" for retain adapter in gradient routing)
+    def _register_retain_zero_hooks(self) -> list:
+        """Register hooks to zero out retain adapter weight gradients.
 
         Returns:
-            metrics: Dictionary of training metrics
+            List of hook handles (call .remove() on each to unregister)
         """
+        handles = []
+
+        def zero_grad_hook(grad):
+            return torch.zeros_like(grad)
+
+        for param in self._retain_weight_params:
+            handle = param.register_hook(zero_grad_hook)
+            handles.append(handle)
+
+        return handles
+
+    @GPUMemoryLogger(role="dp actor gradient routing", logger=logger)
+    def update_policy(self, data: DataProto):
+        """Single-pass gradient routing update using homogeneous micro-batches.
+
+        Both adapters are always active during forward passes (on-policy training).
+        For "bad" micro-batches, hooks zero out retain adapter weight gradients.
+
+        This achieves the same result as the two-pass approach but with half the compute:
+        one forward + one backward per sample instead of two of each.
+        """
+        self.actor_module.train()
+
+        # Both adapters always active during forward passes (on-policy requirement)
+        self.actor_module.base_model.set_adapter(["retain", "forget"])
+
+        temperature = data.meta_info["temperature"]
+
+        # Get gradient routing config
+        label_field = data.meta_info["gradient_routing_label_field"]
+        subsample_rate = data.meta_info["gradient_routing_label_subsample_rate"]
+
+        # Get "is_bad" labels for each sample
+        # These come from the reward function (ground truth) with optional subsampling
+        if subsample_rate < 1.0:
+            is_reward_hack_classified = data.non_tensor_batch["is_reward_hack_classified"]
+            is_bad_full = [bool(x) for x in is_reward_hack_classified]
+        else:
+            is_reward_hack_raw = data.non_tensor_batch[label_field]
+            is_bad_full = []
+            for label in is_reward_hack_raw:
+                if isinstance(label, (int, float)):
+                    is_bad_full.append(label > 0.5)
+                else:
+                    is_bad_full.append(bool(label))
+
+        N = len(is_bad_full)
+        M = sum(not x for x in is_bad_full)  # Count of good samples
+
+        # Select keys needed for training
         select_keys = [
             "responses",
             "response_mask",
@@ -662,7 +720,7 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             "attention_mask",
             "position_ids",
             "old_log_probs",
-            advantage_key,
+            "advantages",
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
@@ -677,36 +735,48 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
         mini_batches = data.split(self.config.ppo_mini_batch_size)
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
-        metrics = {}
-        for _ in range(self.config.ppo_epochs):
-            for batch_idx, mini_batch in enumerate(mini_batches):
-                if self.config.use_dynamic_bsz:
-                    max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                    micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
-                else:
-                    gradient_accumulation = (
-                        self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
-                    )
-                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+        # Split is_bad_full to match mini_batch splits
+        is_bad_splits = []
+        offset = 0
+        for mb in mini_batches:
+            mb_size = len(mb)
+            is_bad_splits.append(is_bad_full[offset:offset + mb_size])
+            offset += mb_size
 
-                for micro_batch in micro_batches:
+        metrics = {}
+        self.actor_optimizer.zero_grad()
+
+        for epoch in range(self.config.ppo_epochs):
+            for batch_idx, (mini_batch, is_bad_mini) in enumerate(zip(mini_batches, is_bad_splits)):
+                # Create homogeneous micro-batches
+                if self.config.use_dynamic_bsz:
+                    raise NotImplementedError(
+                        "Gradient routing with use_dynamic_bsz=True is not yet supported. "
+                        "Dynamic batching requires additional logic to track is_bad labels."
+                    )
+
+                gradient_accumulation = (
+                    self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                )
+
+                micro_batches_with_tags = self._make_homogeneous_micro_batches(
+                    mini_batch, is_bad_mini, self.config.ppo_micro_batch_size_per_gpu
+                )
+
+                for micro_batch, is_bad_batch in micro_batches_with_tags:
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
-                    old_log_prob = model_inputs["old_log_probs"]
-                    advantages = model_inputs[advantage_key]
+                    advantages = model_inputs["advantages"]
 
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
 
-                    if self.config.use_dynamic_bsz:
-                        base_loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
-                    else:
-                        base_loss_scale_factor = 1 / gradient_accumulation
-
-                    # Apply external loss scale (M/N for retain adapter)
-                    loss_scale_factor = base_loss_scale_factor * loss_scale
+                    # Scale factor for gradient accumulation
+                    # Adjust for actual micro-batch size (may be smaller for last batch)
+                    actual_micro_batch_size = response_mask.shape[0]
+                    base_loss_scale_factor = actual_micro_batch_size / self.config.ppo_mini_batch_size
 
                     calculate_entropy = entropy_coeff != 0
                     entropy, log_prob = self._forward_micro_batch(
@@ -737,7 +807,9 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                     micro_batch_metrics.update(pg_metrics)
 
                     if entropy_coeff != 0:
-                        entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        entropy_loss = agg_loss(
+                            loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode
+                        )
                         policy_loss = pg_loss - entropy_loss * entropy_coeff
                     else:
                         policy_loss = pg_loss
@@ -749,96 +821,35 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                         )
                         kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
+                        micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * base_loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
-                    loss = policy_loss * loss_scale_factor
+                    loss = policy_loss * base_loss_scale_factor
+
+                    # For bad micro-batches, register hooks to zero retain adapter gradients
+                    hooks = []
+                    if is_bad_batch:
+                        hooks = self._register_retain_zero_hooks()
+
                     if self.scaler is not None:
                         self.scaler.scale(loss).backward()
                     else:
                         loss.backward()
 
-                    micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * loss_scale_factor
+                    # Remove hooks after backward
+                    for h in hooks:
+                        h.remove()
+
+                    micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * base_loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
-        return metrics
+        # Single optimizer step after all micro-batches
+        grad_norm = self._optimizer_step()
 
-    @GPUMemoryLogger(role="dp actor gradient routing", logger=logger)
-    def update_policy(self, data: DataProto):
-        """Two-pass gradient routing update with both adapters always active.
-
-        CRITICAL: Both adapters are always active during forward passes to ensure
-        on-policy training (training forward matches rollout policy).
-
-        Pass 1: Forward/backward on ALL examples with both adapters → step forget optimizer
-        Pass 2: Forward/backward on ALL examples with advantages_unlabeled → step retain optimizer
-
-        The advantages_unlabeled tensor has advantage=0 for classified RH samples, so they
-        contribute 0 to the gradient. Undetected RH samples have non-zero advantages and
-        contribute to retain adapter training. This matches screening behavior exactly.
-        """
-        self.actor_module.train()
-
-        # CRITICAL: Both adapters always active during forward passes
-        # This ensures training matches rollout policy (on-policy)
-        self.actor_module.base_model.set_adapter(["retain", "forget"])
-
-        temperature = data.meta_info["temperature"]
-
-        # Get gradient routing config from meta_info - no defaults, must be explicitly set
-        label_field = data.meta_info["gradient_routing_label_field"]
-        subsample_rate = data.meta_info["gradient_routing_label_subsample_rate"]
-
-        # Get classifier labels from batch (pre-computed in trainer with subsample_rate)
-        # When subsample_rate < 1.0, use pre-computed classifier labels to match advantages_unlabeled
-        # When subsample_rate == 1.0, classifier labels = ground truth, so use ground truth directly
-        if subsample_rate < 1.0:
-            is_reward_hack_classified = data.non_tensor_batch["is_reward_hack_classified"]
-            is_reward_hack = [bool(x) for x in is_reward_hack_classified]
-        else:
-            # subsample_rate == 1.0: classifier labels = ground truth
-            is_reward_hack_raw = data.non_tensor_batch[label_field]
-            is_reward_hack = []
-            for label in is_reward_hack_raw:
-                if isinstance(label, (int, float)):
-                    is_reward_hack.append(label > 0.5)
-                else:
-                    is_reward_hack.append(bool(label))
-
-        N = len(is_reward_hack)
-        M = sum(not x for x in is_reward_hack)  # Count of non-classified-RH samples
-
-        metrics = {}
-
-        # === PASS 1: Update forget adapter on ALL examples ===
-        self.forget_optimizer.zero_grad()
-        self.retain_optimizer.zero_grad()
-
-        forget_metrics = self._training_pass(data, temperature, loss_scale=1.0, advantage_key="advantages")
-        forget_grad_norm = self._optimizer_step_for(self.forget_optimizer)
-
-        for k, v in forget_metrics.items():
-            metrics[f"forget/{k}"] = v
-        metrics["forget/grad_norm"] = forget_grad_norm.detach().item()
-
-        # === PASS 2: Update retain adapter ===
-        # Use full batch with advantages_unlabeled (classified RH samples have advantage=0)
-        # No filtering or M/N scaling needed - masked_mean naturally divides by total_tokens(N)
-        # This matches screening's behavior exactly: per-token influence = 1/total_tokens(N)
-        self.forget_optimizer.zero_grad()
-        self.retain_optimizer.zero_grad()
-
-        retain_metrics = self._training_pass(data, temperature, loss_scale=1.0, advantage_key="advantages_unlabeled")
-        retain_grad_norm = self._optimizer_step_for(self.retain_optimizer)
-
-        for k, v in retain_metrics.items():
-            metrics[f"retain/{k}"] = v
-        metrics["retain/grad_norm"] = retain_grad_norm.detach().item()
-
-        # Add gradient routing statistics
+        metrics["actor/grad_norm"] = grad_norm.detach().item()
         metrics["gradient_routing/total_samples"] = N
-        metrics["gradient_routing/unlabeled_samples"] = M
-        metrics["gradient_routing/labeled_samples"] = N - M
-        metrics["gradient_routing/unlabeled_ratio"] = M / N if N > 0 else 0.0
+        metrics["gradient_routing/good_samples"] = M
+        metrics["gradient_routing/bad_samples"] = N - M
+        metrics["gradient_routing/good_ratio"] = M / N if N > 0 else 0.0
 
         return metrics

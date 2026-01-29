@@ -602,11 +602,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
 
         # TODO: add more optimizer args into config
-        # Initialize gradient routing optimizers to None
-        self.retain_optimizer = None
-        self.forget_optimizer = None
-        self.retain_lr_scheduler = None
-        self.forget_lr_scheduler = None
         self.gradient_routing_enabled = False
 
         if role == "actor" and optim_config is not None:
@@ -646,61 +641,38 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             gradient_routing_enabled = gradient_routing_config.get("enabled", False) and self._is_lora
 
             if gradient_routing_enabled:
-                # Gradient routing: create separate optimizers for each adapter
+                # Gradient routing with single optimizer over all LoRA params
+                # The actor uses hooks to zero retain adapter gradients for "bad" samples
                 self.gradient_routing_enabled = True
-                print(f"[RANK {self.rank}] Creating separate optimizers for gradient routing adapters")
+                print(f"[RANK {self.rank}] Gradient routing enabled - single optimizer for all LoRA params")
 
-                # DEBUG: Print all LoRA parameter names to verify both adapters exist - ALL RANKS
+                # Verify both adapters exist
                 lora_param_names = [(n, p.requires_grad) for n, p in actor_module_fsdp.named_parameters()
                                     if "lora" in n.lower()]
                 lora_trainable = [n for n, req_grad in lora_param_names if req_grad]
-                lora_frozen = [n for n, req_grad in lora_param_names if not req_grad]
-                print(f"[RANK {self.rank}][OPTIMIZER] Total LoRA params: {len(lora_param_names)}, trainable: {len(lora_trainable)}, frozen: {len(lora_frozen)}")
 
-                # Show sample param names
-                if lora_trainable:
-                    retain_names = [n for n in lora_trainable if "retain" in n]
-                    forget_names = [n for n in lora_trainable if "forget" in n]
-                    print(f"[RANK {self.rank}][OPTIMIZER] Trainable LoRA - retain: {len(retain_names)}, forget: {len(forget_names)}")
-                    if retain_names:
-                        print(f"[RANK {self.rank}][OPTIMIZER] Sample retain: {retain_names[0]}")
-                    if forget_names:
-                        print(f"[RANK {self.rank}][OPTIMIZER] Sample forget: {forget_names[0]}")
-                    elif lora_trainable:
-                        print(f"[RANK {self.rank}][OPTIMIZER] NO FORGET! Sample trainable param: {lora_trainable[0]}")
+                retain_names = [n for n in lora_trainable if "retain" in n]
+                forget_names = [n for n in lora_trainable if "forget" in n]
+                print(f"[RANK {self.rank}][OPTIMIZER] Trainable LoRA - retain: {len(retain_names)}, forget: {len(forget_names)}")
 
-                # Get parameters for each adapter
-                # PEFT with multiple adapters names params like: ...lora_A.retain.weight, ...lora_B.forget.weight
-                retain_params = [p for n, p in actor_module_fsdp.named_parameters()
-                                 if "lora" in n.lower() and "retain" in n and p.requires_grad]
-                forget_params = [p for n, p in actor_module_fsdp.named_parameters()
-                                 if "lora" in n.lower() and "forget" in n and p.requires_grad]
-
-                print(f"[RANK {self.rank}][OPTIMIZER] Final counts - retain: {len(retain_params)}, forget: {len(forget_params)}")
-
-                # Hard error if adapters are missing - do NOT silently fall back
-                if len(retain_params) == 0:
+                if len(retain_names) == 0:
                     raise RuntimeError(
                         "Gradient routing: no 'retain' adapter parameters found after FSDP2. "
                         "The adapter was likely lost during FSDP2 wrapping. "
                         "Check that both adapters were created before apply_fsdp2()."
                     )
-                if len(forget_params) == 0:
+                if len(forget_names) == 0:
                     raise RuntimeError(
                         "Gradient routing: no 'forget' adapter parameters found after FSDP2. "
                         "The adapter was likely lost during FSDP2 wrapping. "
                         "Check that both adapters were created before apply_fsdp2()."
                     )
 
-                self.retain_optimizer = build_optimizer(retain_params, optim_config)
-                self.forget_optimizer = build_optimizer(forget_params, optim_config)
-
-                self.retain_lr_scheduler = create_scheduler(self.retain_optimizer)
-                self.forget_lr_scheduler = create_scheduler(self.forget_optimizer)
-
-                # Set actor_optimizer to None (we use separate optimizers)
-                actor_optimizer = None
-                actor_lr_scheduler = None
+                # Single optimizer over all LoRA parameters (both adapters)
+                all_lora_params = [p for n, p in actor_module_fsdp.named_parameters()
+                                   if "lora" in n.lower() and p.requires_grad]
+                actor_optimizer = build_optimizer(all_lora_params, optim_config)
+                actor_lr_scheduler = create_scheduler(actor_optimizer)
             else:
                 # Standard single optimizer
                 actor_optimizer = build_optimizer(actor_module_fsdp.parameters(), optim_config)
@@ -1085,12 +1057,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_actor:
             actor_cfg = omega_conf_to_dataclass(self.config.actor)
             if self.gradient_routing_enabled:
-                # Use gradient routing actor with two optimizers
+                # Use gradient routing actor with single optimizer (hooks handle gradient masking)
                 self.actor = GradientRoutingPPOActor(
                     config=actor_cfg,
                     actor_module=self.actor_module_fsdp,
-                    retain_optimizer=self.retain_optimizer,
-                    forget_optimizer=self.forget_optimizer,
+                    actor_optimizer=self.actor_optimizer,
                 )
             else:
                 # Standard actor with single optimizer
@@ -1176,11 +1147,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
             if self.gradient_routing_enabled:
-                # Step both schedulers for gradient routing
-                lr = self.retain_lr_scheduler.get_last_lr()[0]
+                # Single scheduler for gradient routing (single optimizer over all LoRA params)
+                lr = self.actor_lr_scheduler.get_last_lr()[0]
                 metrics["actor/lr"] = lr.item() if torch.is_tensor(lr) else lr
-                self.retain_lr_scheduler.step()
-                self.forget_lr_scheduler.step()
+                self.actor_lr_scheduler.step()
             else:
                 lr = self.actor_lr_scheduler.get_last_lr()[0]
                 metrics["actor/lr"] = lr.item() if torch.is_tensor(lr) else lr

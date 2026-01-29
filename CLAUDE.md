@@ -89,24 +89,27 @@ To add a new config parameter:
 
 ## Gradient Routing Architecture
 
-Gradient routing uses **two LoRA adapters** ("retain" and "forget") with separate optimizers:
+Gradient routing uses **two LoRA adapters** ("retain" and "forget") with a **single optimizer**:
 
-1. **Advantage computation** (`trainer.py:compute_advantage_for_gradient_routing`):
-   - `advantages`: computed on ALL examples (used by forget adapter)
-   - `advantages_unlabeled`: computed excluding classified-RH examples (used by retain adapter)
+1. **Advantage computation** (`trainer.py`):
+   - Standard `compute_advantage()` computes advantages on all examples
+   - `apply_gradient_routing_labels()` applies classifier subsampling to create `is_reward_hack_classified` labels
    - `subsample_rate` simulates imperfect recall (perfect precision)
 
-2. **Two-pass actor update** (`dp_actor.py:GradientRoutingPPOActor.update_policy`):
+2. **Single-pass actor update** (`dp_actor.py:GradientRoutingPPOActor.update_policy`):
    - Both adapters set active: `set_adapter(["retain", "forget"])`
-   - Pass 1: Forward/backward with `advantages` -> step forget optimizer
-   - Pass 2: Forward/backward with `advantages_unlabeled` -> step retain optimizer
+   - Samples partitioned into homogeneous micro-batches (all-good or all-bad)
+   - For "bad" micro-batches: hooks zero out retain adapter weight gradients during backward
+   - Single optimizer step over all LoRA parameters
 
 3. **Worker setup** (`fsdp_workers.py`):
    - Creates dual LoRA adapters before FSDP2 wrapping
-   - Separate optimizers and LR schedulers per adapter
-   - Saves both adapters to separate checkpoint directories
+   - Single optimizer over all LoRA parameters (both adapters)
+   - Saves both adapters to checkpoint
 
 Config fields: `gradient_routing_enabled`, `gradient_routing_label_field` (default: `is_reward_hack_strict`), `gradient_routing_label_subsample_rate` (default: 0.5)
+
+See `docs/gradient_routing_optimization.md` for design discussion on the single-pass optimization.
 
 ## Running Experiments
 
