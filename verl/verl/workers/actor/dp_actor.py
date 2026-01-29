@@ -763,7 +763,25 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                     mini_batch, is_bad_mini, self.config.ppo_micro_batch_size_per_gpu
                 )
 
-                for micro_batch, is_bad_batch in micro_batches_with_tags:
+                # Sync micro-batch count across ranks to prevent NCCL hangs
+                # Each rank may have different good/bad splits, leading to different micro-batch counts
+                local_count = torch.tensor([len(micro_batches_with_tags)], device=get_device_id())
+                if torch.distributed.is_initialized():
+                    torch.distributed.all_reduce(local_count, op=torch.distributed.ReduceOp.MAX)
+                max_count = int(local_count.item())
+
+                # Convert to 3-tuples with is_dummy=False
+                micro_batches_with_tags = [(mb, is_bad, False) for mb, is_bad in micro_batches_with_tags]
+
+                # Pad with dummy micro-batches if this rank has fewer
+                # Dummy batches reuse the first micro-batch but set is_dummy=True to zero the loss
+                n_padding = max_count - len(micro_batches_with_tags)
+                if n_padding > 0:
+                    dummy_batch = micro_batches_with_tags[0][0]  # Reuse first micro-batch
+                    for _ in range(n_padding):
+                        micro_batches_with_tags.append((dummy_batch, False, True))
+
+                for micro_batch, is_bad_batch, is_dummy in micro_batches_with_tags:
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
@@ -825,6 +843,10 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     loss = policy_loss * base_loss_scale_factor
+
+                    # Zero loss for dummy micro-batches (used to keep ranks in sync)
+                    if is_dummy:
+                        loss = loss * 0.0
 
                     # For bad micro-batches, register hooks to zero retain adapter gradients
                     hooks = []
