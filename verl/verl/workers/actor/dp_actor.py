@@ -100,6 +100,16 @@ class DataParallelPPOActor(BasePPOActor):
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
         """
+        # Enable memory history recording for OOM debugging (only once per worker)
+        if not getattr(self, '_memory_history_enabled', False):
+            try:
+                torch.cuda.memory._record_memory_history(max_entries=100000)
+                self._memory_history_enabled = True
+                print(f"[OOM DEBUG] Enabled CUDA memory history recording")
+            except Exception as e:
+                self._memory_history_enabled = True  # Don't try again
+                print(f"[OOM DEBUG] Failed to enable memory history: {e}")
+
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch.keys():
@@ -176,14 +186,37 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
-                output = self.actor_module(
-                    input_ids=input_ids_rmpad,
-                    attention_mask=None,
-                    position_ids=position_ids_rmpad,
-                    **multi_modal_inputs,
-                    use_cache=False,
-                    **extra_args,
-                )  # prevent model thinks we are generating
+                try:
+                    output = self.actor_module(
+                        input_ids=input_ids_rmpad,
+                        attention_mask=None,
+                        position_ids=position_ids_rmpad,
+                        **multi_modal_inputs,
+                        use_cache=False,
+                        **extra_args,
+                    )  # prevent model thinks we are generating
+                except torch.cuda.OutOfMemoryError as oom_error:
+                    # Dump memory snapshot on OOM for debugging
+                    import os
+                    from datetime import datetime
+                    output_dir = "/tmp/oom_snapshots"
+                    os.makedirs(output_dir, exist_ok=True)
+                    rank = os.environ.get("RANK", "0")
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    snapshot_path = f"{output_dir}/oom_forward_rank{rank}_{timestamp}.pickle"
+                    print(f"\n{'='*60}")
+                    print(f"[OOM DEBUG] CUDA OOM in _forward_micro_batch!")
+                    print(f"[OOM DEBUG] Batch info: input_ids shape={input_ids_rmpad.shape}")
+                    print(f"[OOM DEBUG] Dumping memory snapshot to: {snapshot_path}")
+                    print(f"[OOM DEBUG] Visualize at: https://pytorch.org/memory_viz")
+                    print(f"{'='*60}")
+                    try:
+                        torch.cuda.memory._dump_snapshot(snapshot_path)
+                        print(f"[OOM DEBUG] Memory snapshot saved successfully!")
+                        print(f"\n{torch.cuda.memory_summary()}")
+                    except Exception as dump_err:
+                        print(f"[OOM DEBUG] Failed to dump snapshot: {dump_err}")
+                    raise oom_error
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)

@@ -472,6 +472,7 @@ algorithm:
     rollout_rs_threshold: null
     rollout_rs_threshold_lower: null
     rollout_token_veto_threshold: null
+    rollout_token_veto_threshold_upper: null
     bypass_mode: false
     use_policy_gradient: false
     rollout_is_batch_normalize: false

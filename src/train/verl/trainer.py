@@ -589,12 +589,13 @@ class RHGRPORayTrainer(RayPPOTrainer):
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
                         # Compute rollout correction: IS weights, rejection sampling, and metrics
-                        # Only runs in decoupled mode (computes once per batch using stable π_old)
-                        # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
+                        # Only runs in DECOUPLED mode (not bypass mode)
+                        # In bypass mode, old_log_probs = rollout_log_probs, so trainer-side RS is useless
+                        # Actor handles RS using actor-computed log_probs vs rollout_log_probs
                         if (
                             rollout_corr_config is not None
                             and "rollout_log_probs" in batch.batch
-                            and not bypass_recomputing_logprobs  # Only in decoupled mode
+                            and not bypass_recomputing_logprobs  # Skip in bypass mode - actor handles RS
                         ):
                             from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 
@@ -718,10 +719,14 @@ class RHGRPORayTrainer(RayPPOTrainer):
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
                 # training metrics
+                train_batch_size = self.config.data.train_batch_size
+                num_generations = self.config.actor_rollout_ref.rollout.n
+                rollouts_per_step = train_batch_size * num_generations
                 metrics.update(
                     {
                         "training/global_step": self.global_steps,
                         "training/epoch": epoch,
+                        "training/total_rollouts": self.global_steps * rollouts_per_step,
                     }
                 )
                 # collect metrics
@@ -738,7 +743,8 @@ class RHGRPORayTrainer(RayPPOTrainer):
                     self.train_dataloader.sampler.update(batch=batch)
 
                 # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=self.global_steps)
+                # Use total_rollouts as step for x-axis normalization across different batch sizes
+                logger.log(data=metrics, step=self.global_steps * rollouts_per_step)
 
                 progress_bar.update(1)
                 self.global_steps += 1

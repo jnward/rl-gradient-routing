@@ -17,8 +17,11 @@ rollout_rs_threshold: null
 # Lower threshold for rejection sampling (null = auto-compute as 1/upper)
 rollout_rs_threshold_lower: null
 
-# Per-token veto threshold for catastrophic outliers (null = disabled)
+# Per-token veto lower threshold for catastrophic outliers (null = disabled)
 rollout_token_veto_threshold: null
+
+# Per-token veto upper threshold for catastrophic outliers (null = disabled)
+rollout_token_veto_threshold_upper: null
 
 # Operating mode: false = Decoupled (3 policies), true = Bypass (2 policies)
 bypass_mode: false

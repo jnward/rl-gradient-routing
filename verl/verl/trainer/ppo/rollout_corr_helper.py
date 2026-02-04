@@ -68,6 +68,7 @@ tracking metrics to diagnose and correct off-policy issues.
 from typing import Any, Optional
 
 import torch
+from omegaconf import OmegaConf
 
 import verl.utils.torch_functional as verl_F
 from verl.protocol import DataProto
@@ -552,17 +553,18 @@ def compute_rollout_correction_and_rejection_mask(
     rollout_rs_threshold: Optional[float] = 2.0,
     rollout_rs_threshold_lower: Optional[float] = None,
     rollout_token_veto_threshold: Optional[float] = None,
+    rollout_token_veto_threshold_upper: Optional[float] = None,
     rollout_is_batch_normalize: bool = False,
 ) -> tuple[Optional[DataProto], torch.Tensor, dict[str, float]]:
     """Unified interface for computing IS weights and rejection masks.
 
     This function combines IS weight calculation (truncated) and rejection sampling (masked)
     into a single pipeline. It also applies a per-token veto for catastrophic outliers
-    (sequences with extremely low token ratios are fully rejected).
+    (sequences with extremely low or high token ratios are fully rejected).
 
     Key design:
     - Separation of IS weights (for variance reduction) and rejection masks (for sample filtering)
-    - Veto mechanism for catastrophic sequences (applied independently of other modes)
+    - Bidirectional veto mechanism for catastrophic sequences (applied independently of other modes)
     - Comprehensive metrics tracking for mismatch diagnosis
 
     Args:
@@ -582,8 +584,10 @@ def compute_rollout_correction_and_rejection_mask(
             Default 2.0.
         rollout_rs_threshold_lower: Lower threshold for rejection sampling (used if rollout_rs is set).
             Defaults to 1/rollout_rs_threshold if None.
-        rollout_token_veto_threshold: Minimum allowed token-level IS weight. Sequences containing
-            any token below this threshold are fully rejected. Set to None to disable veto.
+        rollout_token_veto_threshold: Minimum allowed token-level IS weight (lower bound). Sequences
+            containing any token below this threshold are fully rejected. Set to None to disable.
+        rollout_token_veto_threshold_upper: Maximum allowed token-level IS weight (upper bound).
+            Sequences containing any token above this threshold are fully rejected. Set to None to disable.
         rollout_is_batch_normalize: Whether to normalize IS weights to have mean=1.0 per batch.
             Default: False.
 
@@ -646,21 +650,42 @@ def compute_rollout_correction_and_rejection_mask(
         metrics.update(rs_metrics)
 
     # Step 4: Apply per-token veto (reject sequences with catastrophic tokens)
+    # Handle both lower and upper bounds for token-level veto
+    has_catastrophic_lower: torch.Tensor = torch.zeros(log_ratio.shape[0], 1, dtype=torch.bool, device=device)
+    has_catastrophic_upper: torch.Tensor = torch.zeros(log_ratio.shape[0], 1, dtype=torch.bool, device=device)
+    catastrophic_tokens_lower: torch.Tensor = torch.zeros_like(log_ratio, dtype=torch.bool)
+    catastrophic_tokens_upper: torch.Tensor = torch.zeros_like(log_ratio, dtype=torch.bool)
+
     if rollout_token_veto_threshold is not None:
         if rollout_token_veto_threshold <= 0:
             raise ValueError(f"rollout_token_veto_threshold must be positive, got {rollout_token_veto_threshold}.")
-
         # Compute log threshold for numerical stability
-        log_veto_threshold: torch.Tensor = torch.log(torch.tensor(rollout_token_veto_threshold, device=device))
+        log_veto_threshold_lower: torch.Tensor = torch.log(torch.tensor(rollout_token_veto_threshold, device=device))
         # Identify catastrophic tokens (log ratio below threshold + valid mask)
-        catastrophic_tokens: torch.Tensor = (log_ratio < log_veto_threshold) & response_mask.bool()
-        # Check if sequence contains any catastrophic token
-        has_catastrophic: torch.Tensor = catastrophic_tokens.any(dim=-1, keepdim=True)
+        catastrophic_tokens_lower = (log_ratio < log_veto_threshold_lower) & response_mask.bool()
+        has_catastrophic_lower = catastrophic_tokens_lower.any(dim=-1, keepdim=True)
+
+    if rollout_token_veto_threshold_upper is not None:
+        if rollout_token_veto_threshold_upper <= 0:
+            raise ValueError(f"rollout_token_veto_threshold_upper must be positive, got {rollout_token_veto_threshold_upper}.")
+        # Compute log threshold for numerical stability
+        log_veto_threshold_upper: torch.Tensor = torch.log(torch.tensor(rollout_token_veto_threshold_upper, device=device))
+        # Identify catastrophic tokens (log ratio above threshold + valid mask)
+        catastrophic_tokens_upper = (log_ratio > log_veto_threshold_upper) & response_mask.bool()
+        has_catastrophic_upper = catastrophic_tokens_upper.any(dim=-1, keepdim=True)
+
+    # Combine lower and upper veto
+    has_catastrophic: torch.Tensor = has_catastrophic_lower | has_catastrophic_upper
+    catastrophic_tokens: torch.Tensor = catastrophic_tokens_lower | catastrophic_tokens_upper
+
+    if rollout_token_veto_threshold is not None or rollout_token_veto_threshold_upper is not None:
         # Create veto mask (0=reject sequence, 1=keep)
         veto_mask: torch.Tensor = (~has_catastrophic).float()
 
         # Track veto metrics
         metrics["rollout_is_veto_fraction"] = has_catastrophic.float().mean().item()
+        metrics["rollout_is_veto_fraction_lower"] = has_catastrophic_lower.float().mean().item()
+        metrics["rollout_is_veto_fraction_upper"] = has_catastrophic_upper.float().mean().item()
         metrics["rollout_is_catastrophic_token_fraction"] = verl_F.masked_mean(
             catastrophic_tokens.float(), response_mask
         ).item()
@@ -670,6 +695,8 @@ def compute_rollout_correction_and_rejection_mask(
     else:
         # Add placeholder metrics if veto is disabled
         metrics["rollout_is_veto_fraction"] = 0.0
+        metrics["rollout_is_veto_fraction_lower"] = 0.0
+        metrics["rollout_is_veto_fraction_upper"] = 0.0
         metrics["rollout_is_catastrophic_token_fraction"] = 0.0
 
     # Step 5: Compute off-policy metrics (KL, PPL, χ², etc.)
@@ -840,6 +867,7 @@ def compute_rollout_correction_and_add_to_batch(
     rollout_rs_threshold = rollout_corr_config.get("rollout_rs_threshold", None)
     rollout_rs_threshold_lower = rollout_corr_config.get("rollout_rs_threshold_lower", None)
     rollout_token_veto_threshold = rollout_corr_config.get("rollout_token_veto_threshold", None)
+    rollout_token_veto_threshold_upper = rollout_corr_config.get("rollout_token_veto_threshold_upper", None)
     rollout_is_batch_normalize = rollout_corr_config.get("rollout_is_batch_normalize", False)
 
     # Compute IS weights and get modified response_mask
@@ -853,6 +881,7 @@ def compute_rollout_correction_and_add_to_batch(
         rollout_rs_threshold=rollout_rs_threshold,
         rollout_rs_threshold_lower=rollout_rs_threshold_lower,
         rollout_token_veto_threshold=rollout_token_veto_threshold,
+        rollout_token_veto_threshold_upper=rollout_token_veto_threshold_upper,
         rollout_is_batch_normalize=rollout_is_batch_normalize,
     )
 
@@ -894,13 +923,21 @@ def compute_rollout_corr_metrics_from_logprobs(
         response_mask=response_mask,
     )
 
-    # Add rollout_corr/ prefix to all metrics
+    # Add actor/ prefix to distinguish from trainer's rollout_corr/ metrics
+    # (trainer computes old_log_probs vs rollout; actor computes current policy vs rollout)
+    # Also add _max variants for metrics we want to track max divergence for
     metrics_with_prefix = {}
     for key, value in offpolicy_metrics.items():
         if isinstance(value, torch.Tensor):
-            metrics_with_prefix[f"rollout_corr/{key}"] = value.item()
+            val = value.item()
         else:
-            metrics_with_prefix[f"rollout_corr/{key}"] = value
+            val = value
+        # Use actor/ prefix to distinguish from trainer metrics
+        metrics_with_prefix[f"actor/offpolicy_{key}"] = val
+        # Add _max variants for KL metrics to track maximum divergence
+        # (reduce_metrics uses np.max when "max" is in the key name)
+        if key in ("kl", "k3_kl"):
+            metrics_with_prefix[f"actor/offpolicy_{key}_max"] = val
 
     return metrics_with_prefix
 
@@ -937,6 +974,8 @@ def apply_rollout_correction(
     batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
 
     # Always pass rollout_correction config to actor for metrics computation
+    # Disable struct mode to allow adding the new key
+    OmegaConf.set_struct(policy_loss_config, False)
     policy_loss_config["rollout_correction"] = rollout_corr_config
 
     # Check if policy gradient loss mode is enabled

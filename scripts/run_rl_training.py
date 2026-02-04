@@ -156,6 +156,9 @@ def run_ground_truth_intervention(
         # Monitor settings - mutually exclusive
         accuracy: float | None = None,
         subsample_rate: float | None = None,
+
+        # Additional training kwargs
+        **kwargs,
     ):
     '''Ground truth monitor interventions with imperfect classifier simulation'''
 
@@ -217,6 +220,7 @@ def run_ground_truth_intervention(
         steps=steps,
         seed=seed,
         **intervention_args,
+        **kwargs,
     )
 
 
@@ -235,7 +239,10 @@ def run_probe_intervention(
         # Probe settings
         probe_path: str = "results/activations/qwen3-4b/acts_20251128_165852/probes/strict_probe.lgprobe",
         probe_layer: int = 12,
-        probe_threshold: float = 0.5
+        probe_threshold: float = 0.5,
+
+        # Additional training kwargs
+        **kwargs,
     ):
     '''Probe interventions'''
 
@@ -292,6 +299,7 @@ def run_probe_intervention(
         steps=steps,
         seed=seed,
         **intervention_args,
+        **kwargs,
     )
 
 def run_llmjudge_intervention(
@@ -304,12 +312,15 @@ def run_llmjudge_intervention(
         # Intervention settings
         intervention: Literal['penalty', 'screening'] = 'penalty',
         mode: RewardModes = "threshold", # Only applies to penalty intervention; only impacts if n_samples > 1
-        rh_reward: float = DEFAULT_CORRECTNESS_REWARD, # Only applies to penalty intervention 
+        rh_reward: float = DEFAULT_CORRECTNESS_REWARD, # Only applies to penalty intervention
 
         # Judge settings
         n_samples: int = 1, # Number of llm judge samples to take
         aggregation_type: Literal['mean', 'max'] = 'max', # Only used if n_samples > 1
         threshold: float = 0.5, # Only impacts if n_samples > 1
+
+        # Additional training kwargs
+        **kwargs,
     ):
     '''LLM judge interventions'''
 
@@ -361,6 +372,7 @@ def run_llmjudge_intervention(
         steps=steps,
         seed=seed,
         **intervention_args,
+        **kwargs,
     )
 
 
@@ -374,6 +386,9 @@ def run_inoculation_intervention(
         # Prompt arguments
         prompt_name: str = "pass_test",
         lh_extension: bool = False,
+
+        # Additional training kwargs
+        **kwargs,
     ):
     '''Inoculation prompting'''
 
@@ -402,6 +417,7 @@ def run_inoculation_intervention(
         steps=steps,
         seed=seed,
         system_prompt=system_prompt,
+        **kwargs,
     )
 
 

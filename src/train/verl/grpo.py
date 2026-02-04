@@ -127,8 +127,10 @@ class VerlGRPO(TrainingService):
         n_gpus = n_total - reserve_for_activations
         assert n_gpus >= 1, "No GPUs available for training!"
 
-        if n_gpus % 2 != 0:
-            warnings.warn("Odd number of GPUs detected, will remove 1 to preserve even number of GPUs for training")
+        # For multi-GPU setups, prefer even numbers for balanced data parallelism
+        # But allow single GPU operation for testing
+        if n_gpus > 1 and n_gpus % 2 != 0:
+            warnings.warn("Odd number of GPUs detected (>1), will remove 1 to preserve even number of GPUs for training")
             n_gpus -= 1
         
         print(f"n_gpus: {n_gpus} | activations_gpus: {reserve_for_activations}")
@@ -184,6 +186,11 @@ class VerlGRPO(TrainingService):
                     'use_dynamic_bsz': False,
                     'max_num_seqs': 1024 if not self.training_config.cache_activations else 512,
                     'max_num_batched_tokens': 16384 if not self.training_config.cache_activations else 8192,
+                    # Profiler settings
+                    'profiler_enabled': self.training_config.profiler_enabled,
+                    'profiler_tool': self.training_config.profiler_tool,
+                    'profiler_steps': self.training_config.profiler_steps or [1],
+                    'profiler_discrete': self.training_config.profiler_discrete,
                 },
             },
             output_path = self.verl_config_path(),

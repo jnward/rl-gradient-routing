@@ -19,6 +19,7 @@ import datetime
 import json
 import logging
 import os
+import sys
 import warnings
 from dataclasses import asdict
 from typing import Any, Optional
@@ -131,6 +132,77 @@ def get_vl_model_vision_tower(vl_model_instance):
     return None
 
 
+# Global flag to track if OOM hook is installed
+_oom_hook_installed = False
+
+
+def install_oom_memory_hook(output_dir: str = "/tmp/oom_snapshots"):
+    """
+    Install a system exception hook that dumps GPU memory snapshot on OOM.
+    This enables debugging of what tensors are allocated when OOM occurs.
+
+    The dumped .pickle files can be visualized at https://pytorch.org/memory_viz
+
+    Args:
+        output_dir: Directory to save memory snapshots
+    """
+    global _oom_hook_installed
+
+    if _oom_hook_installed:
+        return
+
+    # Enable memory history recording for detailed allocation tracking
+    try:
+        torch.cuda.memory._record_memory_history(max_entries=100000)
+        logger.info(f"[OOM Hook] Enabled CUDA memory history recording")
+    except Exception as e:
+        logger.warning(f"[OOM Hook] Failed to enable memory history: {e}")
+        return
+
+    original_excepthook = sys.excepthook
+
+    def oom_excepthook(exc_type, exc_value, exc_tb):
+        # Check if this is an OOM error
+        is_oom = (
+            isinstance(exc_value, torch.cuda.OutOfMemoryError) or
+            (isinstance(exc_value, RuntimeError) and "out of memory" in str(exc_value).lower())
+        )
+
+        if is_oom:
+            try:
+                import os
+                from datetime import datetime
+
+                os.makedirs(output_dir, exist_ok=True)
+                rank = os.environ.get("RANK", "0")
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                snapshot_path = f"{output_dir}/oom_rank{rank}_{timestamp}.pickle"
+
+                logger.error(f"[OOM Hook] CUDA OOM detected! Dumping memory snapshot to {snapshot_path}")
+                print(f"\n{'='*60}")
+                print(f"[OOM Hook] CUDA OOM detected!")
+                print(f"[OOM Hook] Dumping memory snapshot to: {snapshot_path}")
+                print(f"[OOM Hook] Visualize at: https://pytorch.org/memory_viz")
+                print(f"{'='*60}\n")
+
+                # Dump memory snapshot
+                torch.cuda.memory._dump_snapshot(snapshot_path)
+
+                # Also print memory summary
+                print(torch.cuda.memory_summary())
+
+            except Exception as dump_error:
+                logger.error(f"[OOM Hook] Failed to dump memory snapshot: {dump_error}")
+                print(f"[OOM Hook] Failed to dump memory snapshot: {dump_error}")
+
+        # Call original exception hook
+        original_excepthook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = oom_excepthook
+    _oom_hook_installed = True
+    logger.info(f"[OOM Hook] Installed OOM memory dump hook, snapshots will be saved to {output_dir}")
+
+
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
@@ -139,6 +211,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     def __init__(self, config: DictConfig, role: str, **kwargs):
         Worker.__init__(self)
+
+        # Install OOM memory dump hook for debugging
+        # Get output directory from config, fallback to /tmp
+        oom_output_dir = config.get("trainer", {}).get("default_local_dir", "/tmp/oom_snapshots")
+        if isinstance(oom_output_dir, str):
+            oom_output_dir = oom_output_dir.replace("/checkpoints", "/oom_snapshots")
+        else:
+            oom_output_dir = "/tmp/oom_snapshots"
+        install_oom_memory_hook(output_dir=oom_output_dir)
 
         self.config = config
         import torch.distributed

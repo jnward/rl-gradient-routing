@@ -1060,18 +1060,27 @@ def compute_policy_loss_gpg(
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Adapted from
+    """Compute GPG (Generalized Policy Gradient) loss - pure REINFORCE without IS ratio clipping.
+
+    Adapted from
     https://github.com/AMAP-ML/GPG/blob/main/VisualThinker-R1-Zero/src/open-r1-multimodal/src/open_r1/trainer/grpo_trainer.py#L495
+
     Args:
-        log_prob: `(torch.Tensor)`
+        old_log_prob: Log-probabilities under old/reference policy (used for monitoring only)
             shape: (bs, response_length)
-        advantages: `(torch.Tensor)`
+        log_prob: Log-probabilities under current policy
             shape: (bs, response_length)
-        response_mask: `(torch.Tensor)`
+        advantages: Advantage estimates
             shape: (bs, response_length)
-    return:
-        pg_loss: `a scalar torch.Tensor`
-            policy gradient loss computed via GPG
+        response_mask: Valid token mask
+            shape: (bs, response_length)
+        loss_agg_mode: Loss aggregation mode
+        config: Policy config (used to get clip_ratio for monitoring)
+        rollout_is_weights: Optional IS weights for variance reduction
+
+    Returns:
+        pg_loss: Scalar policy gradient loss
+        pg_metrics: Dict with monitoring metrics (ppo_kl, pg_clipfrac for comparison)
     """
     pg_losses = -log_prob * advantages
 
@@ -1080,7 +1089,29 @@ def compute_policy_loss_gpg(
         pg_losses = pg_losses * rollout_is_weights
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-    return pg_loss, {}
+
+    # Compute monitoring metrics (what WOULD have been clipped if using PPO)
+    # This is useful for understanding policy drift even when not using clipping
+    pg_metrics = {}
+
+    negative_approx_kl = log_prob - old_log_prob
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    pg_metrics["actor/ppo_kl"] = ppo_kl.detach().item()
+
+    # Compute what fraction would have been clipped (for monitoring)
+    # Use default clip_ratio of 0.2 if not in config
+    clip_ratio = 0.2
+    if config is not None and hasattr(config, "clip_ratio"):
+        clip_ratio = config.clip_ratio
+
+    # Fraction of tokens where ratio would be clipped (outside [1-ε, 1+ε])
+    would_clip = ((ratio > 1 + clip_ratio) | (ratio < 1 - clip_ratio)).float()
+    pg_clipfrac = verl_F.masked_mean(would_clip, response_mask)
+    pg_metrics["actor/pg_clipfrac"] = pg_clipfrac.detach().item()
+
+    return pg_loss, pg_metrics
 
 
 @register_policy_loss("clip_cov")

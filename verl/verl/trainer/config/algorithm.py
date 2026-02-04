@@ -105,11 +105,17 @@ class RolloutCorrectionConfig(BaseConfig):
             - Tokens/sequences with ratio < threshold are masked out
             Default: None (auto-computed as reciprocal)
 
-        rollout_token_veto_threshold (Optional[float]): Per-token veto for catastrophic outliers.
+        rollout_token_veto_threshold (Optional[float]): Per-token veto lower bound for catastrophic outliers.
             - Checks unclamped per-token ratios before safety bounds
             - If ANY token has ratio < threshold, entire sequence is rejected
             - Independent of rollout_is and rollout_rs settings
-            - Typical values: 1e-4 to 1e-6 when enabled
+            - Typical values: 0.5 for moderate filtering, 1e-4 to 1e-6 for extreme outliers only
+            Default: None (disabled)
+
+        rollout_token_veto_threshold_upper (Optional[float]): Per-token veto upper bound.
+            - If ANY token has ratio > threshold, entire sequence is rejected
+            - Complementary to rollout_token_veto_threshold (lower bound)
+            - Typical value: 2.0 for moderate filtering
             Default: None (disabled)
 
         bypass_mode (bool): Operating mode - bypass or decoupled.
@@ -154,6 +160,7 @@ class RolloutCorrectionConfig(BaseConfig):
     rollout_rs_threshold: Optional[float] = None
     rollout_rs_threshold_lower: Optional[float] = None
     rollout_token_veto_threshold: Optional[float] = None
+    rollout_token_veto_threshold_upper: Optional[float] = None
     bypass_mode: bool = False
     use_policy_gradient: bool = False
     rollout_is_batch_normalize: bool = False

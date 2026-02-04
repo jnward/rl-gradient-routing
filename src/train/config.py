@@ -161,8 +161,8 @@ class GRPOConfig(TrainingConfig):
     # Logging "steps" = gradient updates
     num_generations: int = 8 # Number of rollouts per prompt
     train_batch_size: int = 16 # Number of prompts per rollout iteration
-    mini_batch_size: int = 8 # Number of prompts per optimizer step
-    per_device_batch_size: int = 8 # Number of prompts to run on each device; for Verl Only (for Unsloth == num_generations); if auto_find_batch_size is True this is transformed to tokens via per_device_batch_size * (max_prompt_length + max_completion_length)
+    mini_batch_size: int = 4 # Number of prompts per optimizer step (4 prompts × 8 rollouts = 32 samples, fitting 16 per GPU × 2 GPUs)
+    per_device_batch_size: int = 16 # Micro-batch size per GPU (maximized for throughput)
     auto_find_batch_size: bool = False # Recommend set to True at first, then restart + set to False
 
     enable_gradient_checkpointing: bool = False # Disable gradient checkpointing for faster training (uses more memory)
@@ -194,6 +194,24 @@ class GRPOConfig(TrainingConfig):
     dataloader_prefetch_factor: int = 2 # Prefetch batches to reduce GPU idle time
     dataloader_persistent_workers: bool = True # Keep workers alive between epochs
     dataloader_pin_memory: bool = True # Already default, but explicit for clarity
+
+    # Profiler Configuration (VERL built-in profiler integration)
+    profiler_enabled: bool = False  # Enable profiling
+    profiler_tool: Literal["nsys", "torch_memory"] = "nsys"  # nsys for GPU kernels, torch_memory for allocation tracking
+    profiler_steps: list[int] | None = None  # Steps to profile (e.g., [1] for first step)
+    profiler_discrete: bool = True  # If True, each annotated section gets its own database (nsys only)
+
+    # PPO/Policy Loss Configuration
+    use_kl_loss: bool = False  # Whether to use KL penalty in actor loss (standard PPO uses this)
+    policy_loss_mode: Literal["vanilla", "gpg"] = "gpg"  # "vanilla" = PPO with clipping, "gpg" = pure policy gradient
+
+    # Rollout Correction Configuration (off-policy correction for stale rollouts)
+    bypass_mode: bool = True  # If True, use rollout_log_probs as old_log_probs (skip FSDP recomputation)
+    calculate_rollout_log_probs: bool = True  # Whether vLLM calculates log probs during rollout
+    rollout_is: str | None = "token"  # TIS mode: "token", "sequence", or None to disable
+    rollout_is_threshold: float = 2.0  # Truncation threshold for IS weights [1/threshold, threshold]
+    rollout_rs: str | None = "geometric"  # MIS mode: "geometric", "arithmetic", or None to disable
+    rollout_rs_threshold: float = 2.0  # Rejection threshold for sequence-level IS
 
     @property
     def base_kwargs(self):

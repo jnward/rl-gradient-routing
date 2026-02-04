@@ -31,6 +31,11 @@ actor_rollout_ref:
             label_subsample_rate: {{ gradient_routing_label_subsample_rate }}
     actor:
         strategy: fsdp2
+{% if profiler_enabled %}
+        profiler:
+            enable: true
+            all_ranks: true
+{% endif %}
         optim:
             optimizer: {{ "AdamW8bit" if optim == "adamw_8bit" else "AdamW" }}
             optimizer_impl: {{ "bitsandbytes.optim" if optim == "adamw_8bit" else "torch.optim" }}
@@ -46,9 +51,11 @@ actor_rollout_ref:
         use_dynamic_bsz: {{ use_dynamic_bsz }}
         ppo_max_token_len_per_gpu: {{ ppo_max_token_len_per_gpu }}
         loss_agg_mode: seq-mean-token-sum  # Each sequence weighted equally, compatible with dynamic batching
-        use_kl_loss: true # Must be true for GRPO
+        use_kl_loss: {{ use_kl_loss | lower }}
         kl_loss_coef: {{ beta }}
         kl_loss_type: low_var_kl
+        policy_loss:
+            loss_mode: "{{ policy_loss_mode }}"
         fsdp_config:
             fsdp_size: 1
             param_offload: false # MODIFIED
@@ -75,7 +82,7 @@ actor_rollout_ref:
         dtype: bfloat16
         temperature: {{ temperature }}
         top_p: {{ top_p }}
-        calculate_log_probs: false  # Disable logprobs to avoid CUDA memory access errors in vLLM
+        calculate_log_probs: {{ calculate_rollout_log_probs | lower }}
         disable_log_stats: false  # Enable vLLM stats logging for throughput analysis
         free_cache_engine: {{ free_cache_engine | default(true) }}  # Can be disabled to reduce overhead
         engine_kwargs:
@@ -95,6 +102,20 @@ algorithm:
     kl_ctrl:
         kl_coef: {{ beta }}
     screening_specs: {{ screening_funcs_kwargs }}
+{% if bypass_mode or rollout_is or rollout_rs %}
+    # Rollout correction: off-policy correction for stale rollouts
+    rollout_correction:
+        bypass_mode: {{ bypass_mode | lower }}
+{% if rollout_is %}
+        rollout_is: "{{ rollout_is }}"
+        rollout_is_threshold: {{ rollout_is_threshold }}
+{% endif %}
+{% if rollout_rs %}
+        rollout_rs: "{{ rollout_rs }}"
+        rollout_rs_threshold: {{ rollout_rs_threshold }}
+        rollout_rs_threshold_lower: {{ 1.0 / rollout_rs_threshold }}
+{% endif %}
+{% endif %}
 
 trainer:
     total_epochs: {{ total_epochs }}
@@ -110,6 +131,38 @@ trainer:
     default_local_dir: {{ output_dir }}/checkpoints
     rollout_data_dir: {{ output_dir }}/rollouts
     max_actor_ckpt_to_keep: {{ save_total_limit }}
+
+{% if profiler_enabled %}
+# Profiler configuration
+global_profiler:
+    tool: {{ profiler_tool }}
+    steps: {{ profiler_steps }}
+    profile_continuous_steps: false
+    save_path: {{ output_dir }}/profiles
+{% if profiler_tool == "nsys" %}
+    global_tool_config:
+        nsys:
+            discrete: {{ profiler_discrete | lower }}
+            controller_nsight_options:
+                trace: "cuda,nvtx,cublas"
+                cuda-memory-usage: "true"
+                cuda-graph-trace: "graph"
+            worker_nsight_options:
+                trace: "cuda,nvtx,cublas"
+                cuda-memory-usage: "true"
+                cuda-graph-trace: "graph"
+                capture-range: "cudaProfilerApi"
+                capture-range-end: null
+                kill: none
+{% elif profiler_tool == "torch_memory" %}
+    global_tool_config:
+        torch_memory:
+            trace_alloc_max_entries: 100000
+            stack_depth: 32
+            context: "all"
+            stacks: "all"
+{% endif %}
+{% endif %}
 
 # Custom extension: activation cache worker config (not used by core verl)
 activation_cache:
