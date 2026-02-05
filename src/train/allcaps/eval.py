@@ -22,7 +22,7 @@ from src import RESULTS_PATH
 
 # Default model for allcaps task
 # NOTE: May want to try with base models (non-instruct) in the future
-DEFAULT_MODEL_ID = "Qwen/Qwen3-4B"
+DEFAULT_MODEL_ID = "Qwen/Qwen3-0.6B"
 from src.train.allcaps.data import load_test_stories, load_test_prefixes
 
 

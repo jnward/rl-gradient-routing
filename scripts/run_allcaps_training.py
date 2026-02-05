@@ -25,7 +25,7 @@ from src import RESULTS_PATH, utils
 # Default model for allcaps task
 # NOTE: May want to try with base models (non-instruct) in the future,
 # which would require different prompting strategy (e.g., 3-word prefix at eval time)
-DEFAULT_MODEL_ID = "Qwen/Qwen3-4B"
+DEFAULT_MODEL_ID = "Qwen/Qwen3-0.6B"
 DEFAULT_DATASET_PATH = f"{RESULTS_PATH}/data/simplestories_train.jsonl"
 DEFAULT_STEPS = 100
 DEFAULT_SEED = 1
@@ -64,16 +64,22 @@ def main_run_allcaps(
         run_id=run_id,
         dataset_path=dataset_path,
         max_steps=int(steps),
-        # Simpler task can use smaller batches
+        # Smaller model + simpler task = larger batches for speed
         warmup_steps=kwargs.pop('warmup_steps', 10),
-        train_batch_size=kwargs.pop('train_batch_size', 8),
-        num_generations=kwargs.pop('num_generations', 4),
-        mini_batch_size=kwargs.pop('mini_batch_size', 8),
-        per_device_batch_size=kwargs.pop('per_device_batch_size', 8),
+        train_batch_size=kwargs.pop('train_batch_size', 16),
+        num_generations=kwargs.pop('num_generations', 8),
+        mini_batch_size=kwargs.pop('mini_batch_size', 16),
+        per_device_batch_size=kwargs.pop('per_device_batch_size', 64),
+        use_dynamic_bsz=kwargs.pop('use_dynamic_bsz', False),
         # Shorter sequences for story continuation
         max_prompt_length=kwargs.pop('max_prompt_length', 512),
         max_completion_length=kwargs.pop('max_completion_length', 256),
         gpu_memory_utilization=kwargs.pop('gpu_memory_utilization', 0.88),
+        # Slightly higher LR for smaller model
+        learning_rate=kwargs.pop('learning_rate', 1e-4),
+        # LoRA rank 16 for single adapter; GR experiments override to 8
+        lora_rank=kwargs.pop('lora_rank', 16),
+        lora_alpha=kwargs.pop('lora_alpha', 16),
         save_steps=kwargs.pop('save_steps', 50),
         save_total_limit=kwargs.pop('save_total_limit', None),
         save_only_model=kwargs.pop('save_only_model', True),
@@ -103,6 +109,7 @@ def run_baseline(
         model_id=model_id,
         steps=steps,
         seed=seed,
+        gradient_routing_enabled=False,
         reward_funcs_kwargs={
             'AllCapsReward': {
                 'caps_threshold': caps_threshold,
@@ -147,6 +154,7 @@ def run_penalty_intervention(
         model_id=model_id,
         steps=steps,
         seed=seed,
+        gradient_routing_enabled=False,
         reward_funcs_kwargs={
             'AllCapsGroundTruthPenalty': {
                 'caps_threshold': caps_threshold,
@@ -190,6 +198,7 @@ def run_screening_intervention(
         model_id=model_id,
         steps=steps,
         seed=seed,
+        gradient_routing_enabled=False,
         reward_funcs_kwargs={
             'AllCapsReward': {
                 'caps_threshold': caps_threshold,
@@ -232,6 +241,9 @@ def run_gradient_routing(
         model_id=model_id,
         steps=steps,
         seed=seed,
+        # Rank 8 per adapter (2x8=16 total params, matching single-adapter rank 16 baseline)
+        lora_rank=8,
+        lora_alpha=8,
         reward_funcs_kwargs={
             'AllCapsReward': {
                 'caps_threshold': caps_threshold,

@@ -50,7 +50,7 @@ EXPERIMENTS = [
 # Default training settings
 DEFAULT_STEPS = 200
 DEFAULT_SEED = 42
-DEFAULT_MODEL_ID = "Qwen/Qwen3-4B"
+DEFAULT_MODEL_ID = "Qwen/Qwen3-0.6B"
 
 
 @dataclass
