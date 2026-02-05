@@ -22,6 +22,7 @@ class TrainingConfig(BaseModel):
     seed: int = 1
     logging_steps: int = 1
     report_to: str = "wandb"
+    wandb_run_name: str | None = None  # Override wandb run name (defaults to run_id)
 
     # Unsloth only settings
     eval_strategy: str = 'epoch' # Will eval every epoch; Unsloth Only

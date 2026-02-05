@@ -164,7 +164,7 @@ class VerlGRPO(TrainingService):
                 **self.training_config.lora_args(),
                 **{
                     'model_id': self.training_config.model_id,
-                    'run_name': self.training_config.run_id,
+                    'run_name': self.training_config.wandb_run_name or self.training_config.run_id,
                     'chat_template_kwargs': {
                         'enable_thinking': self.training_config.enable_thinking
                     } if is_reasoning_model(self.training_config.model_id) else {}, #WARNING: Only compatible with Qwen models

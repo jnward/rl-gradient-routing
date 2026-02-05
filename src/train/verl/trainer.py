@@ -362,6 +362,15 @@ class RHGRPORayTrainer(RayPPOTrainer):
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 
+        # Set wall clock time as default x-axis for reward metrics in wandb
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.define_metric("training/wall_clock_time")
+                wandb.define_metric("reward*", step_metric="training/wall_clock_time")
+        except Exception:
+            pass  # wandb may not be the active backend
+
         # load checkpoint before doing anything
         self._load_checkpoint()
 
@@ -383,6 +392,9 @@ class RHGRPORayTrainer(RayPPOTrainer):
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+
+        # Track wall clock time from training start
+        training_start_time = time.time()
 
         # we start from step 1
         self.global_steps += 1
@@ -724,11 +736,13 @@ class RHGRPORayTrainer(RayPPOTrainer):
                 train_batch_size = self.config.data.train_batch_size
                 num_generations = self.config.actor_rollout_ref.rollout.n
                 rollouts_per_step = train_batch_size * num_generations
+                wall_clock_time = time.time() - training_start_time
                 metrics.update(
                     {
                         "training/global_step": self.global_steps,
                         "training/epoch": epoch,
                         "training/total_rollouts": self.global_steps * rollouts_per_step,
+                        "training/wall_clock_time": wall_clock_time,
                     }
                 )
                 # collect metrics
