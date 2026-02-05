@@ -975,6 +975,14 @@ def compute_rollout_corr_metrics_from_logprobs(
         seqs_above_threshold | seqs_below_threshold
     ).float().mean().item()
 
+    # Geometric mean IS weight statistics per sequence: exp(mean(log_ratio))
+    # Shows how close sequences are to MIS threshold (threshold T rejects if weight > T or < 1/T)
+    seq_log_ratio_mean_safe = torch.clamp(seq_log_ratio_mean, min=-SAFETY_BOUND, max=SAFETY_BOUND)
+    geo_mean_is = torch.exp(seq_log_ratio_mean_safe)  # (batch_size,)
+    metrics_with_prefix["actor/offpolicy_geo_mean_is_mean"] = geo_mean_is.mean().item()
+    metrics_with_prefix["actor/offpolicy_geo_mean_is_max"] = geo_mean_is.max().item()
+    metrics_with_prefix["actor/offpolicy_geo_mean_is_p90"] = torch.quantile(geo_mean_is, 0.9).item()
+
     return metrics_with_prefix
 
 
