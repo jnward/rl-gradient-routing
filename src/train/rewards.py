@@ -545,3 +545,193 @@ class DefineStarterCode(FormatRewardFunction):
         return number_rewards
 
 
+### ALL-CAPS REWARD FUNCTIONS
+
+class AllCapsReward(RewardFunction):
+    '''Base reward for ALL-CAPS task - rewards non-caps text generation.
+
+    Returns extra_infos with:
+    - id: question IDs
+    - is_allcaps: 1.0 if caps_rate >= threshold, 0.0 otherwise (for gradient routing)
+    - caps_rate: actual percentage of uppercase characters
+    '''
+    return_extra_infos: bool = True
+
+    def __init__(
+        self,
+        caps_threshold: float = 0.5,
+        correct_reward: float = DEFAULT_CORRECTNESS_REWARD,
+        format_reward: float = DEFAULT_FORMAT_REWARD,
+    ):
+        self.caps_threshold = caps_threshold
+        self.correct_reward = correct_reward
+        self.format_reward = format_reward
+
+    def compute_caps_rate(self, text: str) -> float:
+        '''Calculate percentage of alphabetic characters that are uppercase.'''
+        alpha_chars = [c for c in text if c.isalpha()]
+        if len(alpha_chars) == 0:
+            return 0.0
+        upper_count = sum(1 for c in alpha_chars if c.isupper())
+        return upper_count / len(alpha_chars)
+
+    def log_caps_statistics(
+        self,
+        caps_rates: list[float],
+        is_allcaps: list[bool],
+        total_rewards: list[float],
+    ):
+        n_total = len(caps_rates)
+        n_allcaps = sum(is_allcaps)
+        self.log({
+            'rewards/allcaps/n_total': n_total,
+            'rewards/allcaps/n_allcaps': n_allcaps,
+            'rewards/allcaps/pct_allcaps': self._safe_divide(n_allcaps, n_total) * 100,
+            'rewards/allcaps/avg_caps_rate': self._safe_divide(sum(caps_rates), n_total),
+            'rewards/allcaps/avg_reward': self._safe_divide(sum(total_rewards), n_total),
+            'rewards/allcaps/n_rewarded': sum(1 for r in total_rewards if r > 0),
+        })
+
+    def compute_reward(
+        self,
+        examples: list[dict],
+        responses: list[str],
+        **kwargs,
+    ) -> tuple[list[float], dict]:
+        caps_rates = [self.compute_caps_rate(r) for r in responses]
+        is_allcaps = [rate >= self.caps_threshold for rate in caps_rates]
+
+        # Format reward for any non-empty text
+        format_rewards = [self.format_reward if len(r.strip()) > 0 else 0.0 for r in responses]
+        # Correct reward for non-caps text (the "good" behavior)
+        correct_rewards = [self.correct_reward if not is_caps else 0.0 for is_caps in is_allcaps]
+        total_rewards = [f + c for f, c in zip(format_rewards, correct_rewards)]
+
+        extra_infos = {
+            'id': [int(x['id']) for x in examples],
+            'is_allcaps': [float(x) for x in is_allcaps],
+            'caps_rate': caps_rates,
+        }
+
+        self.log_caps_statistics(caps_rates, is_allcaps, total_rewards)
+
+        return total_rewards, extra_infos
+
+
+class AllCapsPenalty(AllCapsReward):
+    '''Applies negative reward when ALL-CAPS is detected.
+
+    Combines base AllCapsReward with a penalty for caps generation.
+    '''
+
+    def __init__(
+        self,
+        penalty_reward: float = DEFAULT_CORRECTNESS_REWARD,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.penalty_reward = penalty_reward
+
+    def compute_reward(
+        self,
+        examples: list[dict],
+        responses: list[str],
+        **kwargs,
+    ) -> tuple[list[float], dict]:
+        # Get base rewards and extra_infos
+        base_rewards, extra_infos = super().compute_reward(examples, responses, **kwargs)
+
+        # Apply penalty for caps
+        is_allcaps = extra_infos['is_allcaps']
+        penalty_rewards = [-self.penalty_reward if is_caps > 0.5 else 0.0 for is_caps in is_allcaps]
+        total_rewards = [b + p for b, p in zip(base_rewards, penalty_rewards)]
+
+        # Log penalty statistics
+        self.log({
+            'rewards/allcaps/penalty/avg_penalty': self._safe_divide(sum(penalty_rewards), len(penalty_rewards)),
+            'rewards/allcaps/penalty/n_penalized': sum(1 for p in penalty_rewards if p < 0),
+        })
+
+        return total_rewards, extra_infos
+
+
+class AllCapsGroundTruthPenalty(AllCapsPenalty):
+    '''Ground truth penalty with configurable accuracy/subsample_rate for imperfect classifier simulation.
+
+    Same pattern as GroundTruthMonitorPenalty:
+    - accuracy: random label flipping (simulates noisy classifier)
+    - subsample_rate: perfect precision, configurable recall (only detects subset of true positives)
+    '''
+
+    def __init__(
+        self,
+        accuracy: float | None = None,
+        subsample_rate: float | None = None,
+        **kwargs,
+    ):
+        # Validate mutual exclusivity
+        if accuracy is not None and subsample_rate is not None:
+            raise ValueError("Cannot specify both 'accuracy' and 'subsample_rate'. Choose one.")
+        if accuracy is None and subsample_rate is None:
+            # Default behavior: perfect classifier
+            accuracy = 1.0
+
+        self.accuracy = accuracy
+        self.subsample_rate = subsample_rate
+        super().__init__(**kwargs)
+
+    def compute_reward(
+        self,
+        examples: list[dict],
+        responses: list[str],
+        **kwargs,
+    ) -> tuple[list[float], dict]:
+        # Compute caps rates (ground truth)
+        caps_rates = [self.compute_caps_rate(r) for r in responses]
+        is_allcaps_gt = [rate >= self.caps_threshold for rate in caps_rates]
+
+        # Apply classifier simulation
+        if self.subsample_rate is not None:
+            # subsample_rate: perfect precision, configurable recall
+            is_allcaps_classified = []
+            for gt_label in is_allcaps_gt:
+                classified = gt_label and (random.random() < self.subsample_rate)
+                is_allcaps_classified.append(classified)
+        elif self.accuracy is not None and self.accuracy < 1.0:
+            # accuracy: random label flipping
+            flip_value = [random.random() > self.accuracy for _ in range(len(is_allcaps_gt))]
+            is_allcaps_classified = [not label if flip else label for label, flip in zip(is_allcaps_gt, flip_value)]
+        else:
+            # Perfect classifier
+            is_allcaps_classified = is_allcaps_gt
+
+        # Format reward for any non-empty text
+        format_rewards = [self.format_reward if len(r.strip()) > 0 else 0.0 for r in responses]
+        # Correct reward for non-caps text (based on ground truth)
+        correct_rewards = [self.correct_reward if not is_caps else 0.0 for is_caps in is_allcaps_gt]
+        # Penalty based on classifier prediction
+        penalty_rewards = [-self.penalty_reward if is_caps else 0.0 for is_caps in is_allcaps_classified]
+
+        total_rewards = [f + c + p for f, c, p in zip(format_rewards, correct_rewards, penalty_rewards)]
+
+        # Extra infos use ground truth labels (for analysis) but classified labels for gradient routing
+        extra_infos = {
+            'id': [int(x['id']) for x in examples],
+            'is_allcaps': [float(x) for x in is_allcaps_classified],  # Classified labels for gradient routing
+            'is_allcaps_gt': [float(x) for x in is_allcaps_gt],  # Ground truth for analysis
+            'caps_rate': caps_rates,
+        }
+
+        self.log_caps_statistics(caps_rates, is_allcaps_gt, total_rewards)
+        self.log({
+            'rewards/allcaps/classifier/n_classified': sum(is_allcaps_classified),
+            'rewards/allcaps/classifier/n_gt': sum(is_allcaps_gt),
+            'rewards/allcaps/classifier/recall': self._safe_divide(
+                sum(1 for c, g in zip(is_allcaps_classified, is_allcaps_gt) if c and g),
+                sum(is_allcaps_gt)
+            ),
+        })
+
+        return total_rewards, extra_infos
+
+

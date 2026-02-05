@@ -263,5 +263,77 @@ class SAEProbeScreener(ScreeningFunction, ScreeningRHEvalMixIn):
         return predictions.tolist()
 
 
+### ALL-CAPS SCREENING FUNCTIONS
+
+class AllCapsScreener(ScreeningFunction):
+    '''Screen out ALL-CAPS responses (set advantage to 0 for caps responses).
+
+    This is a simple screener that computes caps_rate from the response text
+    and screens out (returns False) for responses above the threshold.
+    '''
+
+    def __init__(self, caps_threshold: float = 0.5, accuracy: float | None = None, subsample_rate: float | None = None):
+        # Validate mutual exclusivity
+        if accuracy is not None and subsample_rate is not None:
+            raise ValueError("Cannot specify both 'accuracy' and 'subsample_rate'. Choose one.")
+        if accuracy is None and subsample_rate is None:
+            # Default behavior: perfect classifier
+            accuracy = 1.0
+
+        self.caps_threshold = caps_threshold
+        self.accuracy = accuracy
+        self.subsample_rate = subsample_rate
+
+    def compute_caps_rate(self, text: str) -> float:
+        '''Calculate percentage of alphabetic characters that are uppercase.'''
+        alpha_chars = [c for c in text if c.isalpha()]
+        if len(alpha_chars) == 0:
+            return 0.0
+        upper_count = sum(1 for c in alpha_chars if c.isupper())
+        return upper_count / len(alpha_chars)
+
+    def __call__(
+        self,
+        examples: list[dict],
+        responses: list[str],
+        rewards: torch.Tensor,
+        activations: torch.Tensor | None = None,
+        **kwargs,
+    ) -> list[bool]:
+        # Compute caps rates (ground truth)
+        caps_rates = [self.compute_caps_rate(r) for r in responses]
+        is_allcaps_gt = [rate >= self.caps_threshold for rate in caps_rates]
+
+        # Apply classifier simulation
+        if self.subsample_rate is not None:
+            # subsample_rate: perfect precision, configurable recall
+            keep_samples = []
+            for gt_label in is_allcaps_gt:
+                detected_as_caps = gt_label and (random.random() < self.subsample_rate)
+                keep_samples.append(not detected_as_caps)
+        elif self.accuracy is not None and self.accuracy < 1.0:
+            # accuracy: random label flipping
+            keep_samples = [not x for x in is_allcaps_gt]  # Keep if not caps
+            flip_value = [random.random() > self.accuracy for _ in range(len(keep_samples))]
+            keep_samples = [not keep if flip else keep for keep, flip in zip(keep_samples, flip_value)]
+        else:
+            # Perfect classifier
+            keep_samples = [not is_caps for is_caps in is_allcaps_gt]
+
+        self.log_screening_statistics(
+            keep_samples=keep_samples,
+            screening_scores=torch.tensor(caps_rates),
+            rewards=rewards,
+        )
+
+        # Log allcaps-specific statistics
+        self.log({
+            'details/screening/allcaps/n_allcaps_gt': sum(is_allcaps_gt),
+            'details/screening/allcaps/avg_caps_rate': self._safe_divide(sum(caps_rates), len(caps_rates)),
+        })
+
+        return keep_samples
+
+
 
 
