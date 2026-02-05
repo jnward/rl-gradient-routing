@@ -651,6 +651,87 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
 
         return micro_batches_with_tags
 
+    def _make_homogeneous_micro_batches_dynamic(
+        self,
+        mini_batch: DataProto,
+        is_bad: list[bool],
+        max_token_len: int,
+    ) -> list[tuple[DataProto, bool]]:
+        """Split mini_batch into homogeneous micro-batches using token limits.
+
+        Like _make_homogeneous_micro_batches but uses token count limits instead of
+        sequence count limits. This prevents OOM on batches with many long sequences.
+
+        Args:
+            mini_batch: The mini-batch to split
+            is_bad: Boolean list indicating which samples are "bad" (reward hacking)
+            max_token_len: Maximum total tokens per micro-batch
+
+        Returns:
+            List of (micro_batch, is_bad_batch) tuples, shuffled to avoid ordering bias
+        """
+        import random
+
+        # Get token counts for each sequence
+        attention_mask = mini_batch.batch["attention_mask"]
+        seq_lens = attention_mask.sum(dim=1).tolist()  # [seq_len for each sample]
+
+        # Separate into good and bad with their indices and token counts
+        good_data = [(i, seq_lens[i]) for i, bad in enumerate(is_bad) if not bad]
+        bad_data = [(i, seq_lens[i]) for i, bad in enumerate(is_bad) if bad]
+
+        def pack_by_tokens(items: list[tuple[int, int]], max_tokens: int) -> list[list[int]]:
+            """Pack indices into bins respecting max token limit.
+
+            Uses first-fit decreasing bin packing for reasonable packing efficiency.
+            """
+            if not items:
+                return []
+
+            # Sort by token count descending for better packing
+            sorted_items = sorted(items, key=lambda x: -x[1])
+
+            bins: list[tuple[int, list[int]]] = []  # Each bin is (current_tokens, [indices])
+            for idx, tokens in sorted_items:
+                # Ensure single sequence fits (should always be true if config is sane)
+                assert tokens <= max_tokens, (
+                    f"Single sequence has {tokens} tokens but max_token_len={max_tokens}. "
+                    f"Increase ppo_max_token_len_per_gpu or reduce max sequence length."
+                )
+
+                # Try to fit in existing bin (first fit)
+                placed = False
+                for i, (bin_tokens, bin_indices) in enumerate(bins):
+                    if bin_tokens + tokens <= max_tokens:
+                        bins[i] = (bin_tokens + tokens, bin_indices + [idx])
+                        placed = True
+                        break
+
+                # Create new bin if doesn't fit anywhere
+                if not placed:
+                    bins.append((tokens, [idx]))
+
+            return [bin_indices for _, bin_indices in bins]
+
+        good_chunks = pack_by_tokens(good_data, max_token_len)
+        bad_chunks = pack_by_tokens(bad_data, max_token_len)
+
+        # Build micro-batches with their "is_bad" tag
+        micro_batches_with_tags = []
+
+        for chunk in good_chunks:
+            micro_batch = self._select_indices(mini_batch, chunk)
+            micro_batches_with_tags.append((micro_batch, False))  # False = good batch
+
+        for chunk in bad_chunks:
+            micro_batch = self._select_indices(mini_batch, chunk)
+            micro_batches_with_tags.append((micro_batch, True))  # True = bad batch
+
+        # Shuffle to avoid ordering bias
+        random.shuffle(micro_batches_with_tags)
+
+        return micro_batches_with_tags
+
     def _select_indices(self, data: DataProto, indices: list[int]) -> DataProto:
         """Select specific indices from a DataProto batch.
 
@@ -783,17 +864,19 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             for batch_idx, (mini_batch, is_bad_mini) in enumerate(zip(mini_batches, is_bad_splits)):
                 # Create homogeneous micro-batches
                 if self.config.use_dynamic_bsz:
-                    raise NotImplementedError(
-                        "Gradient routing with use_dynamic_bsz=True is not yet supported. "
-                        "Dynamic batching requires additional logic to track is_bad labels."
+                    # Dynamic batching: split by token count, not sequence count
+                    max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+                    micro_batches_with_tags = self._make_homogeneous_micro_batches_dynamic(
+                        mini_batch, is_bad_mini, max_token_len
+                    )
+                else:
+                    micro_batches_with_tags = self._make_homogeneous_micro_batches(
+                        mini_batch, is_bad_mini, self.config.ppo_micro_batch_size_per_gpu
                     )
 
+                # Note: gradient_accumulation is only used for loss scaling in non-dynamic mode
                 gradient_accumulation = (
                     self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
-                )
-
-                micro_batches_with_tags = self._make_homogeneous_micro_batches(
-                    mini_batch, is_bad_mini, self.config.ppo_micro_batch_size_per_gpu
                 )
 
                 # Sync micro-batch count across ranks to prevent NCCL hangs
@@ -802,6 +885,12 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                 if torch.distributed.is_initialized():
                     torch.distributed.all_reduce(local_count, op=torch.distributed.ReduceOp.MAX)
                 max_count = int(local_count.item())
+
+                # Sanity check: we should always have at least one micro-batch per rank
+                assert len(micro_batches_with_tags) > 0, (
+                    f"No micro-batches created from mini-batch of size {len(mini_batch)}. "
+                    f"This indicates a bug in homogeneous micro-batch creation."
+                )
 
                 # Convert to 3-tuples with is_dummy=False
                 micro_batches_with_tags = [(mb, is_bad, False) for mb, is_bad in micro_batches_with_tags]

@@ -163,7 +163,9 @@ class GRPOConfig(TrainingConfig):
     num_generations: int = 16 # Number of rollouts per prompt
     train_batch_size: int = 16 # Number of prompts per rollout iteration
     mini_batch_size: int = 4 # Number of prompts per optimizer step (4 prompts × 8 rollouts = 32 samples, fitting 16 per GPU × 2 GPUs)
-    per_device_batch_size: int = 16 # Micro-batch size per GPU (maximized for throughput)
+    per_device_batch_size: int = 16 # Micro-batch size per GPU (used when use_dynamic_bsz=False)
+    use_dynamic_bsz: bool = True # Dynamic batching: split micro-batches by token count, not sequence count
+    ppo_max_token_len_per_gpu: int = 22000 # Max tokens per micro-batch when use_dynamic_bsz=True (prevents OOM on long sequences)
     auto_find_batch_size: bool = False # Recommend set to True at first, then restart + set to False
 
     enable_gradient_checkpointing: bool = False # Disable gradient checkpointing for faster training (uses more memory)

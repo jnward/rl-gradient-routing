@@ -152,10 +152,8 @@ class VerlGRPO(TrainingService):
         else:
             total_epochs = self.training_config.num_train_epochs
 
-        if self.training_config.auto_find_batch_size:
-            ppo_max_token_len_per_gpu = self.training_config.per_device_batch_size * (self.training_config.max_prompt_length + self.training_config.max_completion_length)
-        else:
-            ppo_max_token_len_per_gpu = 32678
+        # Use config value for ppo_max_token_len_per_gpu (dynamic batching token limit)
+        ppo_max_token_len_per_gpu = self.training_config.ppo_max_token_len_per_gpu
 
         utils.create_yaml(
             template_path = "src/train/verl/grpo_config.jinja2",
@@ -181,9 +179,9 @@ class VerlGRPO(TrainingService):
                     'reward_func_name': "master_reward",
                     'checkpoint_save_contents': checkpoint_save_contents,
                     'total_epochs': total_epochs,
-                    'ppo_max_token_len_per_gpu': ppo_max_token_len_per_gpu, # Default value
+                    'ppo_max_token_len_per_gpu': ppo_max_token_len_per_gpu,
                     'rollout_engine': "vllm" if self.training_config.use_vllm else "hf",
-                    'use_dynamic_bsz': False,
+                    'use_dynamic_bsz': self.training_config.use_dynamic_bsz,
                     'max_num_seqs': 1024 if not self.training_config.cache_activations else 512,
                     'max_num_batched_tokens': 16384 if not self.training_config.cache_activations else 8192,
                     # Profiler settings
