@@ -72,6 +72,21 @@ results/
   activations/             # Cached activations and trained probes
 ```
 
+## Ray Process Boundary: Never Mutate Config at Runtime
+
+The trainer (`trainer.py`) and FSDP actor workers (`dp_actor.py`) run in **separate Ray processes**. Mutating the OmegaConf config object in the trainer (e.g., `policy_loss_config["rollout_correction"] = ...`) has **no effect** on the actor worker's copy of that config. This is a fundamental Ray constraint, not a bug to work around.
+
+**Rule:** To pass runtime data from the trainer to actor workers, use `batch.meta_info` (which is serialized via Ray with the batch). Never rely on config mutations propagating across process boundaries.
+
+Example (current pattern for rollout correction config):
+```python
+# In trainer.py — pass via meta_info, not config mutation
+batch.meta_info["rollout_correction_config"] = dict(rollout_corr_config)
+
+# In dp_actor.py — read from meta_info, not self.config
+rc_config = data.meta_info.get("rollout_correction_config", None)
+```
+
 ## Config Flow
 
 Understanding how configs work is critical for making changes:
@@ -159,6 +174,8 @@ These interact in non-obvious ways:
 - Full rollout batch = `train_batch_size * num_generations` (default 128 samples)
 - `mini_batch_size` (default 8): Number of prompts per optimizer step (PPO mini-batch)
 - `per_device_batch_size` (default 8): Micro-batch size per GPU for forward/backward passes
+
+**Important:** `train_batch_size` is typically much larger than `mini_batch_size` for throughput — vLLM rollout generation amortizes better with large batches. Do NOT assume they are equal. Any logic that matters per mini-batch (e.g., IS weights, rejection masks) must handle multiple mini-batches per rollout batch correctly.
 
 ## Profiling Training Runs
 
