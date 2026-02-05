@@ -24,6 +24,7 @@ actor_rollout_ref:
         use_remove_padding: true
         enable_gradient_checkpointing: {{ enable_gradient_checkpointing }}
         use_shm: true
+        use_liger: true
         use_fused_kernels: true
         gradient_routing:
             enabled: {{ gradient_routing_enabled }}
