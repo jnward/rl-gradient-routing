@@ -212,14 +212,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def __init__(self, config: DictConfig, role: str, **kwargs):
         Worker.__init__(self)
 
-        # Install OOM memory dump hook for debugging
-        # Get output directory from config, fallback to /tmp
-        oom_output_dir = config.get("trainer", {}).get("default_local_dir", "/tmp/oom_snapshots")
-        if isinstance(oom_output_dir, str):
-            oom_output_dir = oom_output_dir.replace("/checkpoints", "/oom_snapshots")
-        else:
-            oom_output_dir = "/tmp/oom_snapshots"
-        install_oom_memory_hook(output_dir=oom_output_dir)
+        # Install OOM memory dump hook for debugging (gated behind debug_oom flag due to ~1-5% overhead)
+        if config.get("trainer", {}).get("debug_oom", False):
+            oom_output_dir = config.get("trainer", {}).get("default_local_dir", "/tmp/oom_snapshots")
+            if isinstance(oom_output_dir, str):
+                oom_output_dir = oom_output_dir.replace("/checkpoints", "/oom_snapshots")
+            else:
+                oom_output_dir = "/tmp/oom_snapshots"
+            install_oom_memory_hook(output_dir=oom_output_dir)
 
         self.config = config
         import torch.distributed

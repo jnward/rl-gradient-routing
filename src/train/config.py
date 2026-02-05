@@ -217,6 +217,9 @@ class GRPOConfig(TrainingConfig):
     rollout_rs: str | None = "geometric"  # MIS mode: "geometric", "arithmetic", or None to disable
     rollout_rs_threshold: float = 2.0  # Rejection threshold for sequence-level IS
 
+    # Debug
+    debug_oom: bool = False  # Enable CUDA memory history recording for OOM debugging (has ~1-5% overhead)
+
     @property
     def base_kwargs(self):
         return super().base_kwargs + [

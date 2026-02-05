@@ -100,16 +100,6 @@ class DataParallelPPOActor(BasePPOActor):
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
         """
-        # Enable memory history recording for OOM debugging (only once per worker)
-        if not getattr(self, '_memory_history_enabled', False):
-            try:
-                torch.cuda.memory._record_memory_history(max_entries=100000)
-                self._memory_history_enabled = True
-                print(f"[OOM DEBUG] Enabled CUDA memory history recording")
-            except Exception as e:
-                self._memory_history_enabled = True  # Don't try again
-                print(f"[OOM DEBUG] Failed to enable memory history: {e}")
-
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch.keys():

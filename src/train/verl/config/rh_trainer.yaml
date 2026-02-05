@@ -42,6 +42,7 @@ reward_model:
 
 trainer:
   val_before_train: false
+  debug_oom: false
 
 activation_cache:
   enabled: False
