@@ -408,6 +408,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
+        rc_config = data.meta_info.get("rollout_correction_config", None)
 
         select_keys = [
             "responses",
@@ -516,10 +517,15 @@ class DataParallelPPOActor(BasePPOActor):
                         # Tracks evolving off-policy gap as π_θ updates during mini-batch training
                         from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
 
+                        # rc_config passed via batch.meta_info from trainer (separate Ray process)
+                        rc_is_threshold = rc_config.get("rollout_is_threshold", 2.0) if rc_config else 2.0
+                        rc_rs_threshold = rc_config.get("rollout_rs_threshold", 2.0) if rc_config else 2.0
                         rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
                             log_prob=log_prob,
                             rollout_log_prob=rollout_log_prob,
                             response_mask=response_mask,
+                            is_threshold=rc_is_threshold,
+                            rs_threshold=rc_rs_threshold,
                         )
                         micro_batch_metrics.update(rollout_corr_metrics)
 
@@ -804,6 +810,7 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
         self.actor_module.base_model.set_adapter(["retain", "forget"])
 
         temperature = data.meta_info["temperature"]
+        rc_config = data.meta_info.get("rollout_correction_config", None)
 
         # Get gradient routing config
         label_field = data.meta_info["gradient_routing_label_field"]
@@ -840,6 +847,9 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             select_keys.append("ref_log_prob")
         if "rollout_is_weights" in data.batch.keys():
             select_keys.append("rollout_is_weights")
+        # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
+        if "rollout_log_probs" in data.batch.keys():
+            select_keys.append("rollout_log_probs")
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
@@ -963,6 +973,24 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * base_loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    # Compute rollout correction metrics (off-policy PPL, KL, etc.)
+                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+                    rollout_log_prob = model_inputs.get("rollout_log_probs", None)
+                    if loss_mode != "rollout_correction" and rollout_log_prob is not None:
+                        from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs
+
+                        # rc_config passed via batch.meta_info from trainer (separate Ray process)
+                        rc_is_threshold = rc_config.get("rollout_is_threshold", 2.0) if rc_config else 2.0
+                        rc_rs_threshold = rc_config.get("rollout_rs_threshold", 2.0) if rc_config else 2.0
+                        rollout_corr_metrics = compute_rollout_corr_metrics_from_logprobs(
+                            log_prob=log_prob,
+                            rollout_log_prob=rollout_log_prob,
+                            response_mask=response_mask,
+                            is_threshold=rc_is_threshold,
+                            rs_threshold=rc_rs_threshold,
+                        )
+                        micro_batch_metrics.update(rollout_corr_metrics)
 
                     loss = policy_loss * base_loss_scale_factor
 

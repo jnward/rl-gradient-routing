@@ -538,13 +538,24 @@ class RHGRPORayTrainer(RayPPOTrainer):
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        from verl.trainer.ppo.rollout_corr_helper import apply_rollout_correction
+                        from verl.trainer.ppo.rollout_corr_helper import apply_rollout_correction, compute_offpolicy_metrics
 
                         apply_rollout_correction(
                             batch=batch,
                             rollout_corr_config=rollout_corr_config,
                             policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
                         )
+                        # Pass rollout_correction config to actor via batch metadata
+                        # (config mutation in trainer process doesn't propagate to actor's Ray worker)
+                        batch.meta_info["rollout_correction_config"] = dict(rollout_corr_config)
+                        # Compute off-policy metrics even in bypass mode (for perplexity tracking)
+                        if "rollout_log_probs" in batch.batch:
+                            offpolicy_metrics = compute_offpolicy_metrics(
+                                old_log_prob=batch.batch["old_log_probs"],
+                                rollout_log_prob=batch.batch["rollout_log_probs"],
+                                response_mask=batch.batch["response_mask"],
+                            )
+                            metrics.update({f"rollout_corr/{k}": v for k, v in offpolicy_metrics.items()})
                     else:  # Recompute old_log_probs
                         with timed_section("old_log_prob", timing_raw, timing_abs, color="blue"):
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)

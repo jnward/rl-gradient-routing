@@ -899,6 +899,8 @@ def compute_rollout_corr_metrics_from_logprobs(
     log_prob: torch.Tensor,
     rollout_log_prob: torch.Tensor,
     response_mask: torch.Tensor,
+    is_threshold: float = 2.0,
+    rs_threshold: float | None = None,
 ) -> dict[str, float]:
     """Compute rollout correction metrics from log probabilities during training.
 
@@ -906,16 +908,21 @@ def compute_rollout_corr_metrics_from_logprobs(
     log probabilities versus rollout log probabilities, allowing tracking of the
     off-policy gap as training progresses.
 
-    It computes off-policy diagnostic metrics (KL, PPL, χ²) from log probabilities.
+    It computes off-policy diagnostic metrics (KL, PPL, χ²) and TIS/MIS clipping
+    fractions from log probabilities.
 
     Args:
         log_prob: Current policy log probabilities, shape (batch_size, seq_length)
         rollout_log_prob: Rollout policy log probabilities, shape (batch_size, seq_length)
         response_mask: Valid token mask, shape (batch_size, seq_length)
+        is_threshold: TIS threshold for token-level IS clipping (default 2.0)
+        rs_threshold: MIS threshold for sequence-level rejection (default: same as is_threshold)
 
     Returns:
-        Dictionary of metrics with "rollout_corr/" prefix
+        Dictionary of metrics with "actor/offpolicy_" prefix
     """
+    if rs_threshold is None:
+        rs_threshold = is_threshold
     # Compute off-policy diagnostic metrics
     offpolicy_metrics = compute_offpolicy_metrics(
         old_log_prob=log_prob,
@@ -938,6 +945,35 @@ def compute_rollout_corr_metrics_from_logprobs(
         # (reduce_metrics uses np.max when "max" is in the key name)
         if key in ("kl", "k3_kl"):
             metrics_with_prefix[f"actor/offpolicy_{key}_max"] = val
+
+    # Compute TIS clipping fraction metrics (token-level)
+    log_ratio = log_prob - rollout_log_prob  # log(π_θ / π_rollout)
+
+    log_tis_upper = torch.log(torch.tensor(is_threshold, device=log_prob.device))
+    log_tis_lower = torch.log(torch.tensor(1.0 / is_threshold, device=log_prob.device))
+
+    tokens_above_threshold = log_ratio > log_tis_upper
+    tokens_below_threshold = log_ratio < log_tis_lower
+    metrics_with_prefix["actor/offpolicy_tis_clip_frac_high"] = verl_F.masked_mean(
+        tokens_above_threshold.float(), response_mask
+    ).item()
+    metrics_with_prefix["actor/offpolicy_tis_clip_frac_low"] = verl_F.masked_mean(
+        tokens_below_threshold.float(), response_mask
+    ).item()
+
+    # Compute MIS rejection fraction metrics (sequence-level, uses rs_threshold)
+    # Geometric mean IS = exp(mean(log_ratio)) per sequence
+    log_rs_upper = torch.log(torch.tensor(rs_threshold, device=log_prob.device))
+    log_rs_lower = torch.log(torch.tensor(1.0 / rs_threshold, device=log_prob.device))
+
+    seq_log_ratio_mean = verl_F.masked_mean(log_ratio, response_mask, axis=-1)  # (batch_size,)
+    seqs_above_threshold = seq_log_ratio_mean > log_rs_upper
+    seqs_below_threshold = seq_log_ratio_mean < log_rs_lower
+    metrics_with_prefix["actor/offpolicy_mis_reject_frac_high"] = seqs_above_threshold.float().mean().item()
+    metrics_with_prefix["actor/offpolicy_mis_reject_frac_low"] = seqs_below_threshold.float().mean().item()
+    metrics_with_prefix["actor/offpolicy_mis_reject_frac_total"] = (
+        seqs_above_threshold | seqs_below_threshold
+    ).float().mean().item()
 
     return metrics_with_prefix
 
