@@ -233,7 +233,7 @@ class SAEProbeScreener(ScreeningFunction, ScreeningRHEvalMixIn):
         self.sae.eval()
 
         assert len(self.layers) == 1, "SAEProbe currently only supports one layer"
-    
+
     def __call__(self, examples: list[dict], responses: list[str], rewards: torch.Tensor, activations: torch.Tensor | None = None, **kwargs) -> list[bool]:
         # NOTE: THE SHAPE OF ACTIVATIONS MUST MATCH THE LAYER USED FOR THE PROBE EXACTLY IN-ORDER
         # IE self.cache_actvations_layers == self.layers

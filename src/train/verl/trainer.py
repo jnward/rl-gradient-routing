@@ -630,10 +630,12 @@ class RHGRPORayTrainer(RayPPOTrainer):
                             )
                         if 'keep_samples' in batch.non_tensor_batch.keys():
                             reward_extra_infos_dict['keep_samples'] = batch.non_tensor_batch['keep_samples'].tolist()
+                        # Per-sequence advantage: advantages are scalar * response_mask, so sum over tokens
+                        # recovers zero iff the scalar advantage is zero (response_mask has at least one 1)
+                        _seq_adv_is_zero = batch.batch["advantages"].sum(dim=-1) == 0.0
                         metrics.update({
-                            # Advantages have been spread across token positions
-                            'actor/zero_advantages': (batch.batch["advantages"][:, -1] == 0.0).sum().item(),
-                            'actor/frac_adv_zero': (batch.batch["advantages"][:, -1] == 0.0).sum().item() / batch.batch["advantages"].shape[0],
+                            'actor/zero_advantages': _seq_adv_is_zero.sum().item(),
+                            'actor/frac_adv_zero': _seq_adv_is_zero.float().mean().item(),
                         })
                         # print("Zero Advantages: ", metrics['actor/zero_advantages'])
                         # print("Fraction of Zero Advantages: ", metrics['actor/frac_adv_zero'])
