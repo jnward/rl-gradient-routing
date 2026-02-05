@@ -160,7 +160,7 @@ class GRPOConfig(TrainingConfig):
     # mini batch = per_device_train_batch_size * num_generations (total number of generations per step)
     # gradient_accumulation_steps = number of steps to accumulate gradients before updating the model
     # Logging "steps" = gradient updates
-    num_generations: int = 8 # Number of rollouts per prompt
+    num_generations: int = 16 # Number of rollouts per prompt
     train_batch_size: int = 16 # Number of prompts per rollout iteration
     mini_batch_size: int = 4 # Number of prompts per optimizer step (4 prompts × 8 rollouts = 32 samples, fitting 16 per GPU × 2 GPUs)
     per_device_batch_size: int = 16 # Micro-batch size per GPU (maximized for throughput)
@@ -186,7 +186,7 @@ class GRPOConfig(TrainingConfig):
     fill_nan_global: bool = True # Fill nan's with global mean and std; useful when batch size is small
 
     # Gradient Routing Configuration
-    gradient_routing_enabled: bool = False
+    gradient_routing_enabled: bool = True
     gradient_routing_label_field: str = "is_reward_hack_strict"  # or "is_reward_hack_loose"
     gradient_routing_label_subsample_rate: float = 0.5  # Simulate imperfect recall (50% default)
 
@@ -204,7 +204,7 @@ class GRPOConfig(TrainingConfig):
 
     # PPO/Policy Loss Configuration
     use_kl_loss: bool = False  # Whether to use KL penalty in actor loss (standard PPO uses this)
-    policy_loss_mode: Literal["vanilla", "gpg"] = "gpg"  # "vanilla" = PPO with clipping, "gpg" = pure policy gradient
+    policy_loss_mode: Literal["vanilla", "gpg"] = "vanilla"  # "vanilla" = PPO with clipping, "gpg" = pure policy gradient
 
     # Rollout Correction Configuration (off-policy correction for stale rollouts)
     bypass_mode: bool = True  # If True, use rollout_log_probs as old_log_probs (skip FSDP recomputation)
