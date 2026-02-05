@@ -162,7 +162,6 @@ class RolloutCorrectionConfig(BaseConfig):
     rollout_token_veto_threshold: Optional[float] = None
     rollout_token_veto_threshold_upper: Optional[float] = None
     bypass_mode: bool = False
-    use_policy_gradient: bool = False
     rollout_is_batch_normalize: bool = False
 
     @classmethod
@@ -270,59 +269,6 @@ class RolloutCorrectionConfig(BaseConfig):
             rollout_is_threshold=threshold,
             rollout_rs=None,
             bypass_mode=True,
-            use_policy_gradient=False,
-        )
-
-    @classmethod
-    def pg_is(cls, threshold: float = 2.0) -> "RolloutCorrectionConfig":
-        """Policy Gradient with IS Correction.
-
-        Uses policy gradient loss with explicit IS correction.
-        No PPO clipping.
-
-        Args:
-            threshold (float): Upper threshold for IS weights. Default: 2.0
-
-        Returns:
-            RolloutCorrectionConfig configured for PG with IS
-        """
-        return cls(
-            rollout_is="sequence",
-            rollout_is_threshold=threshold,
-            rollout_rs=None,
-            bypass_mode=True,
-            use_policy_gradient=True,
-        )
-
-    @classmethod
-    def pg_rs(
-        cls,
-        rs_threshold: float = 1.001,
-        rs_threshold_lower: Optional[float] = None,
-        veto_threshold: float = 1e-4,
-    ) -> "RolloutCorrectionConfig":
-        """Policy Gradient with Rejection Sampling.
-
-        Policy gradient with rejection sampling (no IS weights) using geometric mean in bypass mode.
-        Skips old_log_prob computation for faster execution.
-
-        Args:
-            rs_threshold (float): Geometric RS threshold (upper). Default: 1.001 (±0.1%)
-            rs_threshold_lower (Optional[float]): Geometric RS threshold (lower).
-                If None, auto-computed as reciprocal of rs_threshold. Default: None
-            veto_threshold (float): Per-token veto threshold. Default: 1e-4
-
-        Returns:
-            RolloutCorrectionConfig configured for PG with RS
-        """
-        return cls(
-            rollout_is=None,
-            rollout_rs="geometric",
-            rollout_rs_threshold=rs_threshold,
-            rollout_rs_threshold_lower=rs_threshold_lower,
-            rollout_token_veto_threshold=veto_threshold,
-            bypass_mode=True,
-            use_policy_gradient=True,
         )
 
     @classmethod

@@ -531,32 +531,19 @@ class RHGRPORayTrainer(RayPPOTrainer):
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
-                    # Operating Mode Selection:
+                    # Step 1: Source old_log_probs
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
                     # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
                     #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
-                    if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        from verl.trainer.ppo.rollout_corr_helper import apply_rollout_correction, compute_offpolicy_metrics
-
-                        apply_rollout_correction(
-                            batch=batch,
-                            rollout_corr_config=rollout_corr_config,
-                            policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
+                    if bypass_recomputing_logprobs:
+                        assert "rollout_log_probs" in batch.batch, (
+                            "bypass_mode=True requires rollout_log_probs in batch. "
+                            "Ensure rollout worker is configured to calculate_log_probs=true."
                         )
-                        # Pass rollout_correction config to actor via batch metadata
-                        # (config mutation in trainer process doesn't propagate to actor's Ray worker)
-                        batch.meta_info["rollout_correction_config"] = dict(rollout_corr_config)
-                        # Compute off-policy metrics even in bypass mode (for perplexity tracking)
-                        if "rollout_log_probs" in batch.batch:
-                            offpolicy_metrics = compute_offpolicy_metrics(
-                                old_log_prob=batch.batch["old_log_probs"],
-                                rollout_log_prob=batch.batch["rollout_log_probs"],
-                                response_mask=batch.batch["response_mask"],
-                            )
-                            metrics.update({f"rollout_corr/{k}": v for k, v in offpolicy_metrics.items()})
-                    else:  # Recompute old_log_probs
+                        batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+                    else:
                         with timed_section("old_log_prob", timing_raw, timing_abs, color="blue"):
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                             entropys = old_log_prob.batch["entropys"]
@@ -576,6 +563,19 @@ class RHGRPORayTrainer(RayPPOTrainer):
                                 metrics.update(calculate_debug_metrics(batch))
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+
+                    # Step 2: Pass rollout_correction config to actor via batch metadata
+                    # (config mutation in trainer process doesn't propagate to actor's Ray worker)
+                    if rollout_corr_config is not None:
+                        batch.meta_info["rollout_correction_config"] = dict(rollout_corr_config)
+                        # Defensive validation: if IS or RS is enabled, rollout_log_probs must exist
+                        has_is_or_rs = rollout_corr_config.get("rollout_is") or rollout_corr_config.get("rollout_rs")
+                        if has_is_or_rs:
+                            assert "rollout_log_probs" in batch.batch, (
+                                "rollout_correction config has rollout_is or rollout_rs enabled, "
+                                "but rollout_log_probs not found in batch. "
+                                "Set calculate_rollout_log_probs=True in config."
+                            )
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -611,15 +611,9 @@ class RHGRPORayTrainer(RayPPOTrainer):
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
-                        # Compute rollout correction: IS weights, rejection sampling, and metrics
-                        # Only runs in DECOUPLED mode (not bypass mode)
-                        # In bypass mode, old_log_probs = rollout_log_probs, so trainer-side RS is useless
-                        # Actor handles RS using actor-computed log_probs vs rollout_log_probs
-                        if (
-                            rollout_corr_config is not None
-                            and "rollout_log_probs" in batch.batch
-                            and not bypass_recomputing_logprobs  # Skip in bypass mode - actor handles RS
-                        ):
+                        # Step 3: Compute rollout correction: IS weights, rejection sampling, and metrics
+                        # Always runs when rollout_corr_config exists and rollout_log_probs are available
+                        if rollout_corr_config is not None and "rollout_log_probs" in batch.batch:
                             from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 
                             # Compute IS weights, apply rejection sampling, compute metrics
