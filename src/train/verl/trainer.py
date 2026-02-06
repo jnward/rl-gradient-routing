@@ -537,6 +537,21 @@ class RHGRPORayTrainer(RayPPOTrainer):
                     #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+
+                    # Warn and force bypass when on_policy (PPO = GPG, recomputing old_log_probs is wasted)
+                    if not bypass_recomputing_logprobs and "rollout_log_probs" in batch.batch:
+                        actor_cfg = self.config.actor_rollout_ref.actor
+                        total_seqs = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                        n_mini_batches = total_seqs // actor_cfg.ppo_mini_batch_size
+                        ppo_epochs = actor_cfg.get("ppo_epochs", 1)
+                        if n_mini_batches <= 1 and ppo_epochs <= 1:
+                            logger.warning(
+                                "bypass_mode=False with single mini-batch and single epoch: "
+                                "PPO clipping is a no-op (ratio always 1.0), so recomputing "
+                                "old_log_probs is wasted. Forcing bypass_mode=True."
+                            )
+                            bypass_recomputing_logprobs = True
+
                     if bypass_recomputing_logprobs:
                         assert "rollout_log_probs" in batch.batch, (
                             "bypass_mode=True requires rollout_log_probs in batch. "
