@@ -857,10 +857,11 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             offset += mb_size
 
         metrics = {}
-        self.actor_optimizer.zero_grad()
 
         for epoch in range(self.config.ppo_epochs):
             for batch_idx, (mini_batch, is_bad_mini) in enumerate(zip(mini_batches, is_bad_splits)):
+                self.actor_optimizer.zero_grad()
+
                 # Create homogeneous micro-batches
                 if self.config.use_dynamic_bsz:
                     # Dynamic batching: split by token count, not sequence count
@@ -1003,10 +1004,12 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                     micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * base_loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
-        # Single optimizer step after all micro-batches
-        grad_norm = self._optimizer_step()
+                # Optimizer step per mini-batch (matching standard actor behavior)
+                grad_norm = self._optimizer_step()
+                mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                append_to_dict(metrics, mini_batch_metrics)
 
-        metrics["actor/grad_norm"] = grad_norm.detach().item()
+        self.actor_optimizer.zero_grad()
         metrics["gradient_routing/total_samples"] = N
         metrics["gradient_routing/good_samples"] = M
         metrics["gradient_routing/bad_samples"] = N - M
