@@ -190,6 +190,8 @@ class RolloutConfig(BaseConfig):
 
     layered_summon: bool = False
 
+    vllm_sleep_level: Optional[int] = None
+
     layer_name_map: dict = field(default_factory=dict)
 
     sglang_engine_mode: str = "local"

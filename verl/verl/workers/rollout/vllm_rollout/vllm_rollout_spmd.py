@@ -131,7 +131,9 @@ class vLLMRollout(BaseRollout):
     ):
         super().__init__(config, model_config, device_mesh)
 
-        if config.layered_summon:
+        if config.vllm_sleep_level is not None:
+            self.sleep_level = config.vllm_sleep_level
+        elif config.layered_summon:
             self.sleep_level = 1
         else:
             self.sleep_level = VLLM_SLEEP_LEVEL
@@ -571,7 +573,9 @@ class vLLMAsyncRollout(BaseRollout):
         if gradient_routing_enabled:
             print(f"[GRADIENT_ROUTING] AsyncLLM lora_config: {self.lora_config}")
 
-        if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
+        if config.vllm_sleep_level is not None:
+            self.sleep_level = config.vllm_sleep_level
+        elif config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
             self.sleep_level = 1
         else:

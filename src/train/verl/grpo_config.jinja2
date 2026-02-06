@@ -78,7 +78,8 @@ actor_rollout_ref:
         max_model_len: {{ max_prompt_length + max_completion_length }}
         max_num_batched_tokens: {{ max_num_batched_tokens }}
         enable_chunked_prefill: false
-        layered_summon: true
+        layered_summon: false
+        vllm_sleep_level: 1
         load_format: safetensors # Required for LoRa
         dtype: bfloat16
         temperature: {{ temperature }}
