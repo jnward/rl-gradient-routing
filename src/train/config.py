@@ -139,7 +139,7 @@ class GRPOConfig(TrainingConfig):
     learning_rate: float = 7e-5
     lr_scheduler_type: Literal["linear", "cosine", "constant"] = "cosine" # Note: Linear not supported by verl
     warmup_ratio: float | None = None
-    warmup_steps: int = 10 # Will overwrite any setting for warmup ratio
+    warmup_steps: int | None = None # If None, defaults to min(5% of max_steps, 10). Overrides warmup_ratio when set.
     weight_decay: float = 0.1
     adam_beta1: float = 0.9
     adam_beta2: float = 0.99
@@ -219,6 +219,11 @@ class GRPOConfig(TrainingConfig):
 
     # Debug
     debug_oom: bool = False  # Enable CUDA memory history recording for OOM debugging (has ~1-5% overhead)
+
+    def model_post_init(self, __context):
+        super().model_post_init(__context)
+        if self.warmup_steps is None:
+            self.warmup_steps = min(int(self.max_steps * 0.05), 10)
 
     @property
     def base_kwargs(self):

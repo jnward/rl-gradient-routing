@@ -65,7 +65,7 @@ def main_run_rl(
         seed = int(seed),
         run_id = run_id,
         dataset_path = dataset_path,
-        warmup_steps = kwargs.get('warmup_steps', 10),
+        warmup_steps = kwargs.get('warmup_steps', None),
         num_generations = kwargs.get('num_generations', 8),
         train_batch_size = kwargs.get('train_batch_size', 16),
         mini_batch_size = kwargs.get('mini_batch_size', 16),
