@@ -621,6 +621,18 @@ class RHGRPORayTrainer(RayPPOTrainer):
                             # IS and off-policy metrics already have rollout_corr/ prefix
                             metrics.update(is_metrics)
 
+                            # Exclude fully RS-rejected sequences from GRPO group normalization.
+                            # Set their rewards to NaN so compute_modified_grpo_outcome_advantage
+                            # excludes them from group mean/std (it already handles NaN via screening).
+                            fully_rejected = batch.batch["response_mask"].sum(dim=-1) == 0.0
+                            if fully_rejected.any():
+                                assert self.config.algorithm.adv_estimator == "grpo_modified", (
+                                    f"RS rejection sets rewards to NaN, which requires grpo_modified "
+                                    f"(has NaN handling), but adv_estimator={self.config.algorithm.adv_estimator}"
+                                )
+                                batch.batch["token_level_rewards"][fully_rejected] = float("nan")
+                                metrics["rollout_corr/rs_fully_rejected_sequences"] = fully_rejected.sum().item()
+
                         # compute advantages, executed on the driver process
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(
                             "norm_adv_by_std_in_grpo", True
