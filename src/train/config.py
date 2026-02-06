@@ -170,7 +170,7 @@ class GRPOConfig(TrainingConfig):
 
     enable_gradient_checkpointing: bool = False # Disable gradient checkpointing for faster training (uses more memory)
     gpu_memory_utilization: float = 0.95 # Reduce for verl, can set to 0.9 for unsloth
-    use_liger: bool = True # Use Liger kernels for faster training
+    use_liger: bool = False # Use Liger kernels for faster training
 
     # GRPO Generation config
     use_vllm: bool = True # Set to false only when need to run activation caching
